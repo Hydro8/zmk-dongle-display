@@ -111,10 +111,16 @@ static void set_modifiers(lv_obj_t *widget, struct modifiers_state state) {
             move_object_y(modifier_symbols[i]->symbol, 1, 0);
             move_object_y(modifier_symbols[i]->selection_line, SIZE_SYMBOLS + 4, SIZE_SYMBOLS + 2);
             modifier_symbols[i]->is_active = true;
+            // AFFICHER L'ICONE
+            lv_obj_clear_flag(modifier_symbols[i]->symbol, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(modifier_symbols[i]->selection_line, LV_OBJ_FLAG_HIDDEN);
         } else if (!mod_is_active && modifier_symbols[i]->is_active) {
             move_object_y(modifier_symbols[i]->symbol, 0, 1);
             move_object_y(modifier_symbols[i]->selection_line, SIZE_SYMBOLS + 2, SIZE_SYMBOLS + 4);
             modifier_symbols[i]->is_active = false;
+            // CACHER L'ICONE
+            lv_obj_add_flag(modifier_symbols[i]->symbol, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(modifier_symbols[i]->selection_line, LV_OBJ_FLAG_HIDDEN);
         }
     }
 }
@@ -155,6 +161,10 @@ int zmk_widget_modifiers_init(struct zmk_widget_modifiers *widget, lv_obj_t *par
         lv_line_set_points(modifier_symbols[i]->selection_line, selection_line_points, 2);
         lv_obj_add_style(modifier_symbols[i]->selection_line, &style_line, 0);
         lv_obj_align_to(modifier_symbols[i]->selection_line, modifier_symbols[i]->symbol, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 3);
+        
+        // CACHER PAR DEFAUT AU DEMARRAGE
+        lv_obj_add_flag(modifier_symbols[i]->symbol, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(modifier_symbols[i]->selection_line, LV_OBJ_FLAG_HIDDEN);
     }
 
     sys_slist_append(&widgets, &widget->node);

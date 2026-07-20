@@ -63,7 +63,7 @@ int zmk_widget_layer_status_init(struct zmk_widget_layer_status *widget, lv_obj_
     widget->obj = lv_label_create(parent);
     
     // Désactiver le scrolling
-    lv_obj_set_style_text_align(widget->obj, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(widget->obj, LV_TEXT_ALIGN_LEFT, 0);
     
     // Agrandir la police d'écriture (Taille 16)
     lv_obj_set_style_text_font(widget->obj, &lv_font_unscii_16, 0);
