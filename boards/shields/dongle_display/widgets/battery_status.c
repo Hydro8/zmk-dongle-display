@@ -144,17 +144,24 @@ int zmk_widget_dongle_battery_status_init(struct zmk_widget_dongle_battery_statu
 
     lv_obj_set_size(widget->obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     
+    // Enlever les bordures et marges par défaut du conteneur
+    lv_obj_set_style_border_width(widget->obj, 0, 0);
+    lv_obj_set_style_pad_all(widget->obj, 0, 0);
+    
     for (int i = 0; i < ZMK_SPLIT_BLE_PERIPHERAL_COUNT + SOURCE_OFFSET; i++) {
         lv_obj_t *image_canvas = lv_canvas_create(widget->obj);
         lv_obj_t *battery_label = lv_label_create(widget->obj);
+        
+        // Forcer le texte de la batterie en blanc
+        lv_obj_set_style_text_color(battery_label, lv_color_white(), 0);
 
         lv_canvas_set_buffer(image_canvas, battery_image_buffer[i], 5, 8, LV_IMG_CF_TRUE_COLOR);
 
         // Cacher l'icône pour toujours
         lv_obj_add_flag(image_canvas, LV_OBJ_FLAG_HIDDEN);
 
-        // Aligner le texte, décalé de 35px vers la droite à chaque fois
-        lv_obj_align(battery_label, LV_ALIGN_TOP_LEFT, i * 35, 0);
+        // Rapprocher les batteries (30px d'écart au lieu de 35px)
+        lv_obj_align(battery_label, LV_ALIGN_LEFT_MID, i * 30, 0);
 
         lv_obj_add_flag(battery_label, LV_OBJ_FLAG_HIDDEN);
         

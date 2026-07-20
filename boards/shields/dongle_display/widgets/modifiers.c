@@ -118,7 +118,7 @@ static void set_modifiers(lv_obj_t *widget, struct modifiers_state state) {
             move_object_y(modifier_symbols[i]->selection_line, SIZE_SYMBOLS + 2, SIZE_SYMBOLS + 4);
             modifier_symbols[i]->is_active = false;
             // Couleur GRISE quand inactif
-            lv_obj_set_style_img_recolor(modifier_symbols[i]->symbol, lv_color_hex(0xCCCCCC), 0);
+            lv_obj_set_style_img_recolor(modifier_symbols[i]->symbol, lv_color_hex(0x808080), 0);
         }
     }
 }
@@ -163,7 +163,7 @@ int zmk_widget_modifiers_init(struct zmk_widget_modifiers *widget, lv_obj_t *par
         // Activer la recoloration
         lv_obj_set_style_img_recolor_opa(modifier_symbols[i]->symbol, LV_OPA_COVER, 0);
         // Couleur GRISE par défaut au démarrage
-        lv_obj_set_style_img_recolor(modifier_symbols[i]->symbol, lv_color_hex(0xCCCCCC), 0);
+        lv_obj_set_style_img_recolor(modifier_symbols[i]->symbol, lv_color_hex(0x808080), 0);
     }
 
     sys_slist_append(&widgets, &widget->node);
