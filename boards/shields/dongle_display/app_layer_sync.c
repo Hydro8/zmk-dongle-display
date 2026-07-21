@@ -3,7 +3,8 @@
 #include <zmk/events/hid_indicators_changed.h>
 #include <zmk/keymap.h>
 
-#define SCROLL_LOCK_BIT (1 << 2)
+// On retient le calque d'appli actuellement actif pour pouvoir le désactiver
+static uint8_t current_app_layer = 0;
 
 static int on_hid_indicators(const zmk_event_t *eh) {
     const struct zmk_hid_indicators_changed *ev = as_zmk_hid_indicators_changed(eh);
@@ -11,14 +12,25 @@ static int on_hid_indicators(const zmk_event_t *eh) {
         return 0;
     }
 
-    // Si Scroll Lock est allumé, on active le calque 2 (ex: Photoshop)
-    if (ev->indicators & SCROLL_LOCK_BIT) {
-        zmk_keymap_layer_activate(2);
-    } else {
-        // Sinon, on le désactive et on revient au calque par défaut
-        zmk_keymap_layer_deactivate(2);
-        zmk_keymap_layer_activate(0);
+    // Le Mac envoie un numéro d'application (0 = par défaut, 1 = Photoshop, 2 = VSCode, etc.)
+    uint8_t app_id = ev->indicators;
+
+    // Si l'appli n'a pas changé, on ne fait rien
+    if (app_id == current_app_layer) {
+        return 0;
     }
+
+    // On désactive l'ancien calque d'appli
+    if (current_app_layer != 0) {
+        zmk_keymap_layer_deactivate(current_app_layer);
+    }
+
+    // On active le nouveau calque (si ce n'est pas 0)
+    if (app_id != 0) {
+        zmk_keymap_layer_activate(app_id);
+    }
+
+    current_app_layer = app_id;
 
     return 0;
 }
