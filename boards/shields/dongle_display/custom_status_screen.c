@@ -31,11 +31,10 @@ lv_obj_t *zmk_display_status_screen() {
 
     screen = lv_obj_create(NULL);
     
-    // Enlever les marges intérieures de l'écran
+    // Enlever les marges de l'écran
     lv_obj_set_style_pad_all(screen, 0, 0);
     lv_obj_set_style_border_width(screen, 0, 0);
 
-    
     lv_style_init(&global_style);
     lv_style_set_bg_color(&global_style, lv_color_white());
     lv_style_set_bg_opa(&global_style, LV_OPA_COVER);
@@ -46,21 +45,21 @@ lv_obj_t *zmk_display_status_screen() {
     lv_obj_add_style(screen, &global_style, LV_PART_MAIN);
 
 #if IS_ENABLED(CONFIG_ZMK_DONGLE_DISPLAY_LAYER)
-    // Calque en HAUT à gauche
+    // Calque en HAUT au CENTRE
     zmk_widget_layer_status_init(&layer_status_widget, screen);
-    lv_obj_align(zmk_widget_layer_status_obj(&layer_status_widget), LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_align(zmk_widget_layer_status_obj(&layer_status_widget), LV_ALIGN_TOP_MID, 0, 0);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_DONGLE_DISPLAY_MODIFIERS)
-    // Modificateurs en BAS à droite
+    // Modificateurs exactement au CENTRE
     zmk_widget_modifiers_init(&modifiers_widget, screen);
-    lv_obj_align(zmk_widget_modifiers_obj(&modifiers_widget), LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_align(zmk_widget_modifiers_obj(&modifiers_widget), LV_ALIGN_CENTER, 0, 0);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_BATTERY)
-    // Batterie des claviers en BAS à gauche
+    // Batteries en BAS (le widget fera le reste pour gauche/droite)
     zmk_widget_dongle_battery_status_init(&dongle_battery_status_widget, screen);
-    lv_obj_align(zmk_widget_dongle_battery_status_obj(&dongle_battery_status_widget), LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_align(zmk_widget_dongle_battery_status_obj(&dongle_battery_status_widget), LV_ALIGN_BOTTOM_MID, 0, 0);
 #endif
 
     return screen;
