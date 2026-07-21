@@ -20,9 +20,9 @@ static struct zmk_widget_layer_status layer_status_widget;
 static struct zmk_widget_modifiers modifiers_widget;
 #endif
 
-#if IS_ENABLED(CONFIG_ZMK_BATTERY)
+//#if IS_ENABLED(CONFIG_ZMK_BATTERY)
 //static struct zmk_widget_dongle_battery_status dongle_battery_status_widget;
-#endif
+//#endif
 
 lv_style_t global_style;
 
