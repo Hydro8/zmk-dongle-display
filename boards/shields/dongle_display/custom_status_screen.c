@@ -31,9 +31,10 @@ lv_obj_t *zmk_display_status_screen() {
 
     screen = lv_obj_create(NULL);
     
-    // Retirer bordures, marges, et scrollbar (qui causent la ligne blanche)
+    // Forcer la suppression de la ligne blanche (bordure, padding, scrollbar)
     lv_obj_set_style_pad_all(screen, 0, 0);
     lv_obj_set_style_border_width(screen, 0, 0);
+    lv_obj_set_style_outline_width(screen, 0, 0);
     lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
 
     lv_style_init(&global_style);
@@ -59,7 +60,7 @@ lv_obj_t *zmk_display_status_screen() {
 
 #if IS_ENABLED(CONFIG_ZMK_BATTERY)
     zmk_widget_dongle_battery_status_init(&dongle_battery_status_widget, screen);
-    // Batterie en BAS au CENTRE
+    // Batterie en BAS (le widget fera le reste pour gauche/droite)
     lv_obj_align(zmk_widget_dongle_battery_status_obj(&dongle_battery_status_widget), LV_ALIGN_BOTTOM_MID, 0, 0);
 #endif
 

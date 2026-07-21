@@ -162,18 +162,27 @@ ZMK_SUBSCRIPTION(widget_dongle_battery_status, zmk_usb_conn_state_changed);
 int zmk_widget_dongle_battery_status_init(struct zmk_widget_dongle_battery_status *widget, lv_obj_t *parent) {
     widget->obj = lv_obj_create(parent);
 
-    lv_obj_set_size(widget->obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-
+    // Le conteneur fait toute la largeur de l'écran
+    lv_obj_set_size(widget->obj, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_pad_all(widget->obj, 0, 0);
+    lv_obj_set_style_border_width(widget->obj, 0, 0);
+    lv_obj_set_style_bg_opa(widget->obj, LV_OPA_TRANSP, 0);
+    
     for (int i = 0; i < ZMK_SPLIT_BLE_PERIPHERAL_COUNT + SOURCE_OFFSET; i++) {
         lv_obj_t *image_canvas = lv_canvas_create(widget->obj);
         lv_obj_t *battery_label = lv_label_create(widget->obj);
 
-        lv_canvas_set_buffer(image_canvas, battery_image_buffer[i], 5, 8, LV_COLOR_FORMAT_L8);
-
-        lv_obj_align(image_canvas, LV_ALIGN_TOP_RIGHT, 0, i * 10);
-        lv_obj_align_to(battery_label, image_canvas, LV_ALIGN_OUT_LEFT_MID, 0, 0);
-
+        lv_canvas_set_buffer(image_canvas, battery_image_buffer[i], 5, 8, LV_IMG_CF_TRUE_COLOR);
         lv_obj_add_flag(image_canvas, LV_OBJ_FLAG_HIDDEN);
+
+        if (i == 0) {
+            // 1ère batterie (gauche) tout à gauche
+            lv_obj_align(battery_label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+        } else {
+            // 2ème batterie (droite) tout à droite
+            lv_obj_align(battery_label, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+        }
+
         lv_obj_add_flag(battery_label, LV_OBJ_FLAG_HIDDEN);
         
         battery_objects[i] = (struct battery_object){
