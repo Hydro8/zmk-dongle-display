@@ -30,7 +30,12 @@ lv_obj_t *zmk_display_status_screen() {
     lv_obj_t *screen;
 
     screen = lv_obj_create(NULL);
+    
+    // Enlever les marges intérieures de l'écran
+    lv_obj_set_style_pad_all(screen, 0, 0);
+    lv_obj_set_style_border_width(screen, 0, 0);
 
+    
     lv_style_init(&global_style);
     lv_style_set_bg_color(&global_style, lv_color_white());
     lv_style_set_bg_opa(&global_style, LV_OPA_COVER);

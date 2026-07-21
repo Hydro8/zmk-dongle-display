@@ -66,7 +66,7 @@ int zmk_widget_layer_status_init(struct zmk_widget_layer_status *widget, lv_obj_
     lv_obj_set_style_text_align(widget->obj, LV_TEXT_ALIGN_LEFT, 0);
     
     // Agrandir la police d'écriture (Taille 16)
-    lv_obj_set_style_text_font(widget->obj, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_font(widget->obj, &lv_font_montserrat_24, 0);
 
     sys_slist_append(&widgets, &widget->node);
     widget_layer_status_init();

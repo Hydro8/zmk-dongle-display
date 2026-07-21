@@ -111,14 +111,14 @@ static void set_modifiers(lv_obj_t *widget, struct modifiers_state state) {
             move_object_y(modifier_symbols[i]->symbol, 1, 0);
             move_object_y(modifier_symbols[i]->selection_line, SIZE_SYMBOLS + 4, SIZE_SYMBOLS + 2);
             modifier_symbols[i]->is_active = true;
-            // Couleur NOIRE en code = BLANC sur ton écran
-            lv_obj_set_style_img_recolor(modifier_symbols[i]->symbol, lv_color_black(), 0);
+            // Opacité maximale (BLANC sur ton écran)
+            lv_obj_set_style_img_opa(modifier_symbols[i]->symbol, LV_OPA_COVER, 0);
         } else if (!mod_is_active && modifier_symbols[i]->is_active) {
             move_object_y(modifier_symbols[i]->symbol, 0, 1);
             move_object_y(modifier_symbols[i]->selection_line, SIZE_SYMBOLS + 2, SIZE_SYMBOLS + 4);
             modifier_symbols[i]->is_active = false;
-            // Couleur GRISE en code = GRIS sur ton écran
-            lv_obj_set_style_img_recolor(modifier_symbols[i]->symbol, lv_color_hex(0xCCCCCC), 0);
+            // Opacité réduite (GRIS sur ton écran)
+            lv_obj_set_style_img_opa(modifier_symbols[i]->symbol, LV_OPA_40, 0);
         }
     }
 }
@@ -155,13 +155,13 @@ int zmk_widget_modifiers_init(struct zmk_widget_modifiers *widget, lv_obj_t *par
         lv_obj_align(modifier_symbols[i]->symbol, LV_ALIGN_TOP_LEFT, 1 + (SIZE_SYMBOLS + 1) * i, 1);
         lv_img_set_src(modifier_symbols[i]->symbol, modifier_symbols[i]->symbol_dsc);
 
+        // Opacité réduite (GRIS) par défaut au démarrage
+        lv_obj_set_style_img_opa(modifier_symbols[i]->symbol, LV_OPA_40, 0);
+
         modifier_symbols[i]->selection_line = lv_line_create(widget->obj);
         lv_line_set_points(modifier_symbols[i]->selection_line, selection_line_points, 2);
         lv_obj_add_style(modifier_symbols[i]->selection_line, &style_line, 0);
         lv_obj_align_to(modifier_symbols[i]->selection_line, modifier_symbols[i]->symbol, LV_ALIGN_OUT_BOTTOM_LEFT, 0, 3);
-        
-        lv_obj_set_style_img_recolor_opa(modifier_symbols[i]->symbol, LV_OPA_COVER, 0);
-        lv_obj_set_style_img_recolor(modifier_symbols[i]->symbol, lv_color_hex(0xCCCCCC), 0);
     }
 
     sys_slist_append(&widgets, &widget->node);
