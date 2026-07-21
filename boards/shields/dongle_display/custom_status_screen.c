@@ -5,7 +5,7 @@
  */
 
 #include "custom_status_screen.h"
-#include "widgets/battery_status.h"
+//#include "widgets/battery_status.h"
 #include "widgets/modifiers.h"
 #include "widgets/layer_status.h"
 
@@ -21,7 +21,7 @@ static struct zmk_widget_modifiers modifiers_widget;
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_BATTERY)
-static struct zmk_widget_dongle_battery_status dongle_battery_status_widget;
+//static struct zmk_widget_dongle_battery_status dongle_battery_status_widget;
 #endif
 
 lv_style_t global_style;
@@ -56,11 +56,11 @@ lv_obj_t *zmk_display_status_screen() {
     lv_obj_align(zmk_widget_modifiers_obj(&modifiers_widget), LV_ALIGN_CENTER, 0, 10);
 #endif
 
-#if IS_ENABLED(CONFIG_ZMK_BATTERY)
+//#if IS_ENABLED(CONFIG_ZMK_BATTERY)
     // Batteries en BAS (le widget fera le reste pour gauche/droite)
-    zmk_widget_dongle_battery_status_init(&dongle_battery_status_widget, screen);
-    lv_obj_align(zmk_widget_dongle_battery_status_obj(&dongle_battery_status_widget), LV_ALIGN_BOTTOM_MID, 0, 0);
-#endif
+//    zmk_widget_dongle_battery_status_init(&dongle_battery_status_widget, screen);
+//    lv_obj_align(zmk_widget_dongle_battery_status_obj(&dongle_battery_status_widget), LV_ALIGN_BOTTOM_MID, 0, 0);
+//#endif
 
     return screen;
 }
