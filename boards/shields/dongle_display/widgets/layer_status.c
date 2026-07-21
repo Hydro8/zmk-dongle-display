@@ -5,6 +5,7 @@
  */
 
 #include <string.h>
+#include <ctype.h> // Pour la fonction toupper()
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
@@ -29,7 +30,15 @@ static void set_layer_symbol(lv_obj_t *label, struct layer_status_state state) {
         sprintf(text, "L:%i", state.index); // Affiche "L:0" si pas de nom défini
         lv_label_set_text(label, text);
     } else {
-        lv_label_set_text(label, state.label);
+        char text[13] = {};
+        snprintf(text, sizeof(text), "%s", state.label);
+        
+        // Forcer les majuscules
+        for (int i = 0; text[i]; i++) {
+            text[i] = toupper((unsigned char)text[i]);
+        }
+        
+        lv_label_set_text(label, text);
     }
 }
 
@@ -53,12 +62,11 @@ ZMK_SUBSCRIPTION(widget_layer_status, zmk_layer_state_changed);
 int zmk_widget_layer_status_init(struct zmk_widget_layer_status *widget, lv_obj_t *parent) {
     widget->obj = lv_label_create(parent);
     
-    // On désactive le scrolling pour que le texte reste statique
-    // lv_obj_set_width(widget->obj, CONFIG_ZMK_DONGLE_DISPLAY_LAYER_NAME_SCROLL_WIDTH);
-    // lv_label_set_long_mode(widget->obj, LV_LABEL_LONG_SCROLL_CIRCULAR);
-
     // Force l'alignement au centre pour ce widget
     lv_obj_set_style_text_align(widget->obj, LV_TEXT_ALIGN_CENTER, 0);
+
+    // Agrandir la police d'écriture (Taille 24)
+    lv_obj_set_style_text_font(widget->obj, &lv_font_montserrat_24, 0);
 
     sys_slist_append(&widgets, &widget->node);
     widget_layer_status_init();
