@@ -111,14 +111,14 @@ static void set_modifiers(lv_obj_t *widget, struct modifiers_state state) {
             move_object_y(modifier_symbols[i]->symbol, 1, 0);
             move_object_y(modifier_symbols[i]->selection_line, SIZE_SYMBOLS + 4, SIZE_SYMBOLS + 2);
             modifier_symbols[i]->is_active = true;
-            // Opacité maximale (BLANC sur ton écran)
+            // Opacité max = Blanc sur ton écran
             lv_obj_set_style_img_opa(modifier_symbols[i]->symbol, LV_OPA_COVER, 0);
         } else if (!mod_is_active && modifier_symbols[i]->is_active) {
             move_object_y(modifier_symbols[i]->symbol, 0, 1);
             move_object_y(modifier_symbols[i]->selection_line, SIZE_SYMBOLS + 2, SIZE_SYMBOLS + 4);
             modifier_symbols[i]->is_active = false;
-            // Opacité réduite (GRIS sur ton écran)
-            lv_obj_set_style_img_opa(modifier_symbols[i]->symbol, LV_OPA_40, 0);
+            // Opacité 0 = Invisible sur ton écran
+            lv_obj_set_style_img_opa(modifier_symbols[i]->symbol, LV_OPA_0, 0);
         }
     }
 }
@@ -155,8 +155,8 @@ int zmk_widget_modifiers_init(struct zmk_widget_modifiers *widget, lv_obj_t *par
         lv_obj_align(modifier_symbols[i]->symbol, LV_ALIGN_TOP_LEFT, 1 + (SIZE_SYMBOLS + 1) * i, 1);
         lv_img_set_src(modifier_symbols[i]->symbol, modifier_symbols[i]->symbol_dsc);
 
-        // Opacité réduite (GRIS) par défaut au démarrage
-        lv_obj_set_style_img_opa(modifier_symbols[i]->symbol, LV_OPA_40, 0);
+        // Invisible par défaut au démarrage
+        lv_obj_set_style_img_opa(modifier_symbols[i]->symbol, LV_OPA_0, 0);
 
         modifier_symbols[i]->selection_line = lv_line_create(widget->obj);
         lv_line_set_points(modifier_symbols[i]->selection_line, selection_line_points, 2);

@@ -144,11 +144,13 @@ int zmk_widget_dongle_battery_status_init(struct zmk_widget_dongle_battery_statu
 
     lv_obj_set_size(widget->obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     
-    // Enlever les bordures et marges par défaut du conteneur
-    lv_obj_set_style_border_width(widget->obj, 0, 0);
+    // Tuer les marges et bordures du conteneur
     lv_obj_set_style_pad_all(widget->obj, 0, 0);
+    lv_obj_set_style_border_width(widget->obj, 0, 0);
+    lv_obj_set_style_bg_opa(widget->obj, LV_OPA_TRANSP, 0); // Fond transparent
     
     for (int i = 0; i < ZMK_SPLIT_BLE_PERIPHERAL_COUNT + SOURCE_OFFSET; i++) {
+        // ... la suite du code reste la même
         lv_obj_t *image_canvas = lv_canvas_create(widget->obj);
         lv_obj_t *battery_label = lv_label_create(widget->obj);
         // On ne force plus la couleur, elle prendra le noir par défaut de l'écran
