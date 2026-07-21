@@ -53,7 +53,7 @@ lv_obj_t *zmk_display_status_screen() {
 #if IS_ENABLED(CONFIG_ZMK_DONGLE_DISPLAY_MODIFIERS)
     // Modificateurs exactement au CENTRE
     zmk_widget_modifiers_init(&modifiers_widget, screen);
-    lv_obj_align(zmk_widget_modifiers_obj(&modifiers_widget), LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(zmk_widget_modifiers_obj(&modifiers_widget), LV_ALIGN_CENTER, 0, 10);
 #endif
 
 #if IS_ENABLED(CONFIG_ZMK_BATTERY)
