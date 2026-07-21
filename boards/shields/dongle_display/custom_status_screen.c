@@ -37,9 +37,9 @@ lv_obj_t *zmk_display_status_screen() {
     lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
 
     lv_style_init(&global_style);
-    lv_style_set_bg_color(&global_style, lv_color_black()); // Fond NOIR
+    lv_style_set_bg_color(&global_style, lv_color_white()); // Code Blanc = Ecran Noir
     lv_style_set_bg_opa(&global_style, LV_OPA_COVER);
-    lv_style_set_text_color(&global_style, lv_color_white()); // Texte BLANC
+    lv_style_set_text_color(&global_style, lv_color_black()); // Code Noir = Ecran Blanc
     lv_style_set_text_font(&global_style, &lv_font_unscii_8);
     lv_style_set_text_letter_space(&global_style, 1);
     lv_style_set_text_line_space(&global_style, 1);
