@@ -30,4 +30,4 @@ if(CONFIG_ZMK_DISPLAY AND CONFIG_ZMK_DISPLAY_STATUS_SCREEN_CUSTOM AND ((NOT CONF
         zephyr_library_sources(widgets/wpm_status_sym.c)
     endif()
 endif()
-target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/boards/shields/dongle_display/app_layer_sync.c)
+target_sources(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app_layer_sync.c)
