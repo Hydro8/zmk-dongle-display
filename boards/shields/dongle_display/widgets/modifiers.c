@@ -141,7 +141,8 @@ ZMK_SUBSCRIPTION(widget_modifiers, zmk_keycode_state_changed);
 
 int zmk_widget_modifiers_init(struct zmk_widget_modifiers *widget, lv_obj_t *parent) {
     widget->obj = lv_obj_create(parent);
-
+    lv_obj_set_style_pad_all(widget->obj, 0, 0);
+    lv_obj_set_style_border_width(widget->obj, 0, 0);
     lv_obj_set_size(widget->obj, NUM_SYMBOLS * (SIZE_SYMBOLS + 1) + 1, SIZE_SYMBOLS + 3);
     
     static lv_style_t style_line;
