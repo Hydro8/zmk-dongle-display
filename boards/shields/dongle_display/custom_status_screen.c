@@ -19,17 +19,16 @@ static struct zmk_widget_layer_status layer_status_widget;
 static struct zmk_widget_modifiers modifiers_widget;
 #endif
 
-// Batterie désactivée temporairement pour la migration Zephyr 4.1
-// #if IS_ENABLED(CONFIG_ZMK_BATTERY)
-// static struct zmk_widget_dongle_battery_status dongle_battery_status_widget;
-// #endif
-
 lv_style_t global_style;
 
 lv_obj_t *zmk_display_status_screen() {
     lv_obj_t *screen;
 
     screen = lv_obj_create(NULL);
+    
+    // Retirer la bordure et les marges par défaut de l'écran (LVGL 9)
+    lv_obj_set_style_pad_all(screen, 0, 0);
+    lv_obj_set_style_border_width(screen, 0, 0);
 
     lv_style_init(&global_style);
     lv_style_set_bg_color(&global_style, lv_color_white());
@@ -48,15 +47,9 @@ lv_obj_t *zmk_display_status_screen() {
 
 #if IS_ENABLED(CONFIG_ZMK_DONGLE_DISPLAY_MODIFIERS)
     zmk_widget_modifiers_init(&modifiers_widget, screen);
-    // Modificateurs en BAS à DROITE
-    lv_obj_align(zmk_widget_modifiers_obj(&modifiers_widget), LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    // Modificateurs en DESSOUS du calque (décalé de 35px vers le bas)
+    lv_obj_align(zmk_widget_modifiers_obj(&modifiers_widget), LV_ALIGN_TOP_MID, 0, 35);
 #endif
-
-// Batterie désactivée temporairement
-// #if IS_ENABLED(CONFIG_ZMK_BATTERY)
-//     zmk_widget_dongle_battery_status_init(&dongle_battery_status_widget, screen);
-//     lv_obj_align(zmk_widget_dongle_battery_status_obj(&dongle_battery_status_widget), LV_ALIGN_BOTTOM_MID, 0, 0);
-// #endif
 
     return screen;
 }
