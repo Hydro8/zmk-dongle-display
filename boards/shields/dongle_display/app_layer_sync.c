@@ -17,23 +17,34 @@ static int on_hid_indicators(const zmk_event_t *eh) {
     return 0;
 }
 
-// 2. On écoute les touches du clavier pour intercepter F13
+// 2. On écoute les touches du clavier
 static int on_keycode_state_changed(const zmk_event_t *eh) {
     const struct zmk_keycode_state_changed *ev = as_zmk_keycode_state_changed(eh);
     if (ev == NULL || !ev->state) {
         return 0;
     }
 
-    // DEBUG : Si on appuie sur F13 (Usage Page 0x07, Keycode 0x68)
+    // Si on appuie sur F13 (Usage Page 0x07, Keycode 0x68)
     if (ev->usage_page == 0x07 && ev->keycode == 0x68) {
-        current_app_layer = 99; // Si l'écran affiche 99, c'est que le dongle a bien reçu la touche !
-        
-        if (zmk_keymap_layer_active(8)) { // On teste en dur avec le calque 8 pour voir
-            zmk_keymap_layer_deactivate(8, true);
-        } else {
-            zmk_keymap_layer_activate(8, true);
+        if (current_app_layer > 0) {
+            // Bascule : si actif, désactive ; si inactif, active
+            if (zmk_keymap_layer_active(current_app_layer)) {
+                zmk_keymap_layer_deactivate(current_app_layer, true);
+            } else {
+                zmk_keymap_layer_activate(current_app_layer, true);
+            }
         }
-        return ZMK_EV_EVENT_HANDLED;
+        return ZMK_EV_EVENT_HANDLED; // Avale la touche F13
+    }
+
+    // 3. One-Shot : Si le calque d'appli est actif et qu'on tape une vraie touche, on le désactive
+    if (current_app_layer > 0 && zmk_keymap_layer_active(current_app_layer)) {
+        // Si ce n'est pas un modificateur (0xE0 à 0xE7)
+        bool is_mod = (ev->usage_page == 0x07 && ev->keycode >= 0xE0 && ev->keycode <= 0xE7);
+        
+        if (!is_mod) {
+            zmk_keymap_layer_deactivate(current_app_layer, true);
+        }
     }
 
     return 0;
