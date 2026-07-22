@@ -1,0 +1,11 @@
+description: Configuration for Application Layers
+
+compatible: "app,layer-config"
+
+include: base.yaml
+
+properties:
+  auto-layers:
+    type: array
+    required: false
+    description: List of layer indices that should activate automatically.
