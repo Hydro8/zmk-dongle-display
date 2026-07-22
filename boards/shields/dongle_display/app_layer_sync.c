@@ -24,17 +24,16 @@ static int on_keycode_state_changed(const zmk_event_t *eh) {
         return 0;
     }
 
-    // Si on appuie sur F13 (Usage Page 0x07, Keycode 0x68)
+    // DEBUG : Si on appuie sur F13 (Usage Page 0x07, Keycode 0x68)
     if (ev->usage_page == 0x07 && ev->keycode == 0x68) {
-        if (current_app_layer > 0) {
-            // Bascule : si actif, désactive ; si inactif, active
-            if (zmk_keymap_layer_active(current_app_layer)) {
-                zmk_keymap_layer_deactivate(current_app_layer, true);
-            } else {
-                zmk_keymap_layer_activate(current_app_layer, true);
-            }
+        current_app_layer = 99; // Si l'écran affiche 99, c'est que le dongle a bien reçu la touche !
+        
+        if (zmk_keymap_layer_active(8)) { // On teste en dur avec le calque 8 pour voir
+            zmk_keymap_layer_deactivate(8, true);
+        } else {
+            zmk_keymap_layer_activate(8, true);
         }
-        return ZMK_EV_EVENT_HANDLED; // Avale la touche pour ne pas l'envoyer au Mac
+        return ZMK_EV_EVENT_HANDLED;
     }
 
     return 0;
