@@ -28,15 +28,15 @@ struct layer_status_state {
 extern uint8_t current_app_layer;
 
 static void set_layer_symbol(lv_obj_t *label, struct layer_status_state state) {
-    char text[20] = {};
-    
     if (state.label == NULL) {
-        sprintf(text, "L:%i %i", state.index, current_app_layer);
+        char text[7] = {};
+        sprintf(text, "L:%i", state.index); // Affiche "L:0" si pas de nom défini
+        lv_label_set_text(label, text);
     } else {
-        snprintf(text, sizeof(text), "%s %i", state.label, current_app_layer);
+        char text[13] = {};
+        snprintf(text, sizeof(text), "%s", state.label);
+        lv_label_set_text(label, text);
     }
-    
-    lv_label_set_text(label, text);
 }
 
 static void layer_status_update_cb(struct layer_status_state state) {

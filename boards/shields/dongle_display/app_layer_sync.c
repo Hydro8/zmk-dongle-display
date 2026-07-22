@@ -25,13 +25,13 @@ static int on_keycode_state_changed(const zmk_event_t *eh) {
     }
 
     // Si on appuie sur F13 (Usage Page 0x07, Keycode 0x68)
-    if (ev->usage_page == HID_USAGE_KEY && ev->keycode == HID_USAGE_KEY_KEYBOARD_F13) {
+    if (ev->usage_page == 0x07 && ev->keycode == 0x68) {
         if (current_app_layer > 0) {
             // Bascule : si actif, désactive ; si inactif, active
             if (zmk_keymap_layer_active(current_app_layer)) {
-                zmk_keymap_layer_deactivate(current_app_layer, true);
+                zmk_keymap_layer_deactivate(current_app_layer);
             } else {
-                zmk_keymap_layer_activate(current_app_layer, true);
+                zmk_keymap_layer_activate(current_app_layer);
             }
         }
         return ZMK_EV_EVENT_HANDLED; // Avale la touche pour ne pas l'envoyer au Mac
