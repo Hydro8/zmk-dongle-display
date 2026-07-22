@@ -30,7 +30,7 @@ lv_obj_t *app_label;
 
 // Fonction qui met à jour le texte toutes les 500ms
 static void update_app_label(lv_timer_t *timer) {
-    lv_label_set_text_fmt(app_label, "App: %d", current_app_layer);
+    lv_label_set_text_fmt(app_label, "%d", current_app_layer);
 }
 
 lv_obj_t *zmk_display_status_screen() {
@@ -67,8 +67,8 @@ lv_obj_t *zmk_display_status_screen() {
 
     // Le texte de debug en bas au centre
     app_label = lv_label_create(screen);
-    lv_obj_align(app_label, LV_ALIGN_BOTTOM_MID, 0, -15);
-    lv_label_set_text(app_label, "App: 0");
+    lv_obj_align(app_label, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_label_set_text(app_label, "0");
     
     // Lance le minuteur de mise à jour
     lv_timer_create(update_app_label, 500, NULL);
