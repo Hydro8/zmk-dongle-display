@@ -5,8 +5,9 @@
 #include <zmk/keymap.h>
 #include <zmk/hid.h>
 
-uint8_t current_app_layer = 0;  // Calque manuel en attente de F13 (ou calque auto actif)
-uint8_t active_app_layer = 0;   // Calque réellement activé
+uint8_t current_app_layer = 0;
+uint8_t active_app_layer = 0;
+bool is_layer_persistent = false;
 
 // 1. On écoute le Mac
 static int on_hid_indicators(const zmk_event_t *eh) {
@@ -16,14 +17,18 @@ static int on_hid_indicators(const zmk_event_t *eh) {
     }
     
     uint8_t received = ev->indicators;
-    bool is_auto = (received >= 100); // > 100 = Automatique
-    uint8_t layer = is_auto ? received - 100 : received;
+    
+    // Décode les bits
+    bool is_one_shot = (received & 0x80) != 0; // Bit 7 (128)
+    bool is_auto = (received & 0x40) != 0;     // Bit 6 (64)
+    uint8_t layer = received & 0x3F;           // Bits 0 à 5 (0 à 63)
     
     // On désactive l'ancien calque s'il est actif
     if (active_app_layer > 0 && zmk_keymap_layer_active(active_app_layer)) {
         zmk_keymap_layer_deactivate(active_app_layer, true);
     }
     active_app_layer = 0;
+    is_layer_persistent = false;
     
     if (layer == 0) {
         // Retour à la base
@@ -32,10 +37,12 @@ static int on_hid_indicators(const zmk_event_t *eh) {
         // Calque automatique : on l'active direct !
         zmk_keymap_layer_activate(layer, true);
         active_app_layer = layer;
-        current_app_layer = layer; // On mémorise pour l'affichage OLED
+        current_app_layer = layer;
+        is_layer_persistent = !is_one_shot; // Si One-Shot, alors non persistant
     } else {
         // Calque manuel : on le stocke en mémoire
         current_app_layer = layer;
+        is_layer_persistent = !is_one_shot;
     }
     
     return ZMK_EV_EVENT_BUBBLE;
@@ -51,19 +58,17 @@ static int on_keycode_state_changed(const zmk_event_t *eh) {
     // Appui sur F13 (0x68)
     if (ev->usage_page == 0x07 && ev->keycode == 0x68) {
         if (current_app_layer > 0 && active_app_layer == 0) {
-            // Si le calque est en attente (manuel), on l'active
             zmk_keymap_layer_activate(current_app_layer, true);
             active_app_layer = current_app_layer;
         } else if (active_app_layer > 0) {
-            // S'il est déjà actif, on le désactive (Toggle)
             zmk_keymap_layer_deactivate(active_app_layer, true);
             active_app_layer = 0;
         }
         return ZMK_EV_EVENT_HANDLED;
     }
 
-    // 3. One-Shot : Désactive le calque MANUEL après une frappe
-    if (active_app_layer > 0 && current_app_layer == active_app_layer) {
+    // 3. One-Shot : Désactive le calque après une frappe (UNIQUEMENT si non persistant)
+    if (active_app_layer > 0 && !is_layer_persistent) {
         bool is_mod = (ev->usage_page == 0x07 && ev->keycode >= 0xE0 && ev->keycode <= 0xE7);
         if (!is_mod) {
             zmk_keymap_layer_deactivate(active_app_layer, true);
