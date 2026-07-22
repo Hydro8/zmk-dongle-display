@@ -26,6 +26,9 @@ static int on_keycode_state_changed(const zmk_event_t *eh) {
 
     // Si on appuie sur F13 (Usage Page 0x07, Keycode 0x68)
     if (ev->usage_page == 0x07 && ev->keycode == 0x68) {
+        
+        current_app_layer = 8; // <-- ON FORCE LE CALQUE 8 ICI POUR LE TEST
+        
         if (current_app_layer > 0) {
             // Bascule : si actif, désactive ; si inactif, active
             if (zmk_keymap_layer_active(current_app_layer)) {
