@@ -24,6 +24,9 @@ struct layer_status_state {
     const char *label;
 };
 
+// On récupère la variable de l'autre fichier
+extern uint8_t current_app_layer;
+
 static void set_layer_symbol(lv_obj_t *label, struct layer_status_state state) {
     char text[20] = {};
     
