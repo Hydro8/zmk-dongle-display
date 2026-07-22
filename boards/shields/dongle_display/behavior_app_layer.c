@@ -6,6 +6,8 @@
 #include <zmk/events/keycode_state_changed.h>
 #include <dt-bindings/zmk/keys.h>
 
+#define DT_DRV_COMPAT zmk_behavior_app_layer
+
 // On récupère la variable de l'autre fichier
 extern uint8_t current_app_layer;
 
