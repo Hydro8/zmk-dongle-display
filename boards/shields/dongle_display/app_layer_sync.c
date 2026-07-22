@@ -5,7 +5,7 @@
 #include <zmk/keymap.h>
 #include <zmk/hid.h>
 
-uint8_t current_app_layer = 0;  // Calque manuel en attente de F13
+uint8_t current_app_layer = 0;  // Calque manuel en attente de F13 (ou calque auto actif)
 uint8_t active_app_layer = 0;   // Calque réellement activé
 
 // 1. On écoute le Mac
@@ -32,7 +32,7 @@ static int on_hid_indicators(const zmk_event_t *eh) {
         // Calque automatique : on l'active direct !
         zmk_keymap_layer_activate(layer, true);
         active_app_layer = layer;
-        current_app_layer = 0; // Pas besoin d'attendre F13
+        current_app_layer = layer; // On mémorise pour l'affichage OLED
     } else {
         // Calque manuel : on le stocke en mémoire
         current_app_layer = layer;
@@ -50,20 +50,20 @@ static int on_keycode_state_changed(const zmk_event_t *eh) {
 
     // Appui sur F13 (0x68)
     if (ev->usage_page == 0x07 && ev->keycode == 0x68) {
-        if (current_app_layer > 0) {
-            if (zmk_keymap_layer_active(current_app_layer)) {
-                zmk_keymap_layer_deactivate(current_app_layer, true);
-                active_app_layer = 0;
-            } else {
-                zmk_keymap_layer_activate(current_app_layer, true);
-                active_app_layer = current_app_layer;
-            }
+        if (current_app_layer > 0 && active_app_layer == 0) {
+            // Si le calque est en attente (manuel), on l'active
+            zmk_keymap_layer_activate(current_app_layer, true);
+            active_app_layer = current_app_layer;
+        } else if (active_app_layer > 0) {
+            // S'il est déjà actif, on le désactive (Toggle)
+            zmk_keymap_layer_deactivate(active_app_layer, true);
+            active_app_layer = 0;
         }
         return ZMK_EV_EVENT_HANDLED;
     }
 
     // 3. One-Shot : Désactive le calque MANUEL après une frappe
-    if (active_app_layer > 0 && current_app_layer > 0) {
+    if (active_app_layer > 0 && current_app_layer == active_app_layer) {
         bool is_mod = (ev->usage_page == 0x07 && ev->keycode >= 0xE0 && ev->keycode <= 0xE7);
         if (!is_mod) {
             zmk_keymap_layer_deactivate(active_app_layer, true);
