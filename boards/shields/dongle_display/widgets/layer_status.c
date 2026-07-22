@@ -24,22 +24,19 @@ struct layer_status_state {
     const char *label;
 };
 
+// On récupère la variable de l'autre fichier
+extern uint8_t current_app_layer;
+
 static void set_layer_symbol(lv_obj_t *label, struct layer_status_state state) {
+    char text[20] = {};
+    
     if (state.label == NULL) {
-        char text[7] = {};
-        sprintf(text, "L:%i", state.index); // Affiche "L:0" si pas de nom défini
-        lv_label_set_text(label, text);
+        sprintf(text, "L:%i App:%i", state.index, current_app_layer);
     } else {
-        char text[13] = {};
-        snprintf(text, sizeof(text), "%s", state.label);
-        
-        // Forcer les majuscules
-        for (int i = 0; text[i]; i++) {
-            text[i] = toupper((unsigned char)text[i]);
-        }
-        
-        lv_label_set_text(label, text);
+        snprintf(text, sizeof(text), "%s App:%i", state.label, current_app_layer);
     }
+    
+    lv_label_set_text(label, text);
 }
 
 static void layer_status_update_cb(struct layer_status_state state) {
