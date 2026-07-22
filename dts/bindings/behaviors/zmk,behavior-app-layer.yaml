@@ -1,0 +1,9 @@
+description: Application Layer behavior
+
+compatible: "zmk,behavior-app-layer"
+
+include: zero_param.yaml
+
+properties:
+  "#binding-cells":
+    const: 0
