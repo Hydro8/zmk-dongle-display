@@ -3,7 +3,7 @@
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/keymap.h>
 #include <zmk/hid.h>
-#include <raw_hid/events.h> // Inclusion du module Raw HID
+#include <raw_hid/events.h>
 
 uint8_t current_app_layer = 0;
 uint8_t active_app_layer = 0;
@@ -16,12 +16,12 @@ static int on_raw_hid_received(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
     
-    // Le premier octet (0) contient notre payload
-    uint8_t received = ev->data[0];
-    bool is_one_shot = (received & 0x80) != 0;
-    bool is_auto = (received & 0x40) != 0;
-    uint8_t layer = received & 0x3F;
+    // Lecture claire du protocole
+    uint8_t layer = ev->data[0];
+    bool is_auto = (ev->data[1] == 1);
+    bool is_one_shot = (ev->data[2] == 1);
     
+    // On désactive l'ancien calque s'il est actif
     if (active_app_layer > 0 && zmk_keymap_layer_active(active_app_layer)) {
         zmk_keymap_layer_deactivate(active_app_layer, true);
     }
@@ -29,13 +29,16 @@ static int on_raw_hid_received(const zmk_event_t *eh) {
     is_layer_persistent = false;
     
     if (layer == 0) {
+        // Retour à la base
         current_app_layer = 0;
     } else if (is_auto) {
+        // Calque automatique : on l'active direct !
         zmk_keymap_layer_activate(layer, true);
         active_app_layer = layer;
         current_app_layer = layer;
         is_layer_persistent = !is_one_shot;
     } else {
+        // Calque manuel : on le stocke en mémoire
         current_app_layer = layer;
         is_layer_persistent = !is_one_shot;
     }
