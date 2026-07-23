@@ -3,17 +3,21 @@
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/keymap.h>
 #include <zmk/hid.h>
-#include <zmk/usb.h>
+#include <raw_hid/events.h> // Inclusion du module Raw HID
 
 uint8_t current_app_layer = 0;
 uint8_t active_app_layer = 0;
 bool is_layer_persistent = false;
 
-// Fonction appelée quand le Mac envoie des données sur le canal Raw HID
-void zmk_app_layer_receive(const uint8_t *data, size_t len) {
-    if (len < 1) return;
+// 1. On écoute les données reçues du Mac via Raw HID
+static int on_raw_hid_received(const zmk_event_t *eh) {
+    const struct raw_hid_received_event *ev = as_raw_hid_received_event(eh);
+    if (ev == NULL) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
     
-    uint8_t received = data[0];
+    // Le premier octet (0) contient notre payload
+    uint8_t received = ev->data[0];
     bool is_one_shot = (received & 0x80) != 0;
     bool is_auto = (received & 0x40) != 0;
     uint8_t layer = received & 0x3F;
@@ -35,6 +39,8 @@ void zmk_app_layer_receive(const uint8_t *data, size_t len) {
         current_app_layer = layer;
         is_layer_persistent = !is_one_shot;
     }
+    
+    return ZMK_EV_EVENT_BUBBLE;
 }
 
 // 2. On écoute les touches du clavier (inchangé)
@@ -65,6 +71,9 @@ static int on_keycode_state_changed(const zmk_event_t *eh) {
 
     return ZMK_EV_EVENT_BUBBLE;
 }
+
+ZMK_LISTENER(app_layer_sync_hid, on_raw_hid_received);
+ZMK_SUBSCRIPTION(app_layer_sync_hid, raw_hid_received_event);
 
 ZMK_LISTENER(app_layer_sync_key, on_keycode_state_changed);
 ZMK_SUBSCRIPTION(app_layer_sync_key, zmk_keycode_state_changed);
