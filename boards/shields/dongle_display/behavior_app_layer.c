@@ -53,7 +53,7 @@ static int behavior_app_layer_pressed(struct zmk_behavior_binding *binding,
          * zmk_keymap_layer_deactivate() removes the layer
          * from the active layer stack.
          */
-        zmk_keymap_layer_deactivate(active_app_layer);
+        zmk_keymap_layer_deactivate(active_app_layer, event.source);
         app_layer_is_active = false;
     } else {
         /*
@@ -61,7 +61,7 @@ static int behavior_app_layer_pressed(struct zmk_behavior_binding *binding,
          * zmk_keymap_layer_activate() pushes the layer
          * onto the active layer stack.
          */
-        zmk_keymap_layer_activate(active_app_layer);
+        zmk_keymap_layer_deactivate(active_app_layer, event.source);
         app_layer_is_active = true;
     }
 
