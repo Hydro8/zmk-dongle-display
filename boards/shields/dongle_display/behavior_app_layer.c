@@ -19,6 +19,8 @@
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/keymap.h>
 
+#define DT_DRV_COMPAT zmk_behavior_app_layer
+
 /*
  * Shared variable defined in app_layer_sync.c.
  * Holds the layer number that the Mac requested via raw HID.
