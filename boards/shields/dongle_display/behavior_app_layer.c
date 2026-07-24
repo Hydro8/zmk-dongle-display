@@ -8,18 +8,31 @@
  * app_layer_sync.c) to know WHICH layer to toggle, then activates or
  * deactivates that layer via the ZMK keymap API.
  *
- * We intentionally avoid DT_INST_FOREACH_STATUS_OKAY because Zephyr 4.1.0
- * fails to expand it correctly for custom behavior nodes declared in
- * keymap overlay files. Instead we use DEVICE_DT_DEFINE with DT_NODELABEL
- * which resolves the node directly by its label.
+ * Uses BEHAVIOR_DT_INST_DEFINE(0, ...) directly instead of
+ * DT_INST_FOREACH_STATUS_OKAY to avoid a Zephyr 4.1.0 macro
+ * expansion bug with custom behavior nodes in keymap overlays.
  */
 
-#include <zephyr/kernel.h>
-#include <zmk/behavior.h>
+/*
+ * Devicetree compatible string for this behavior.
+ * Must be defined BEFORE including any headers because
+ * <drivers/behavior.h> and other ZMK headers may use it.
+ * Matches compatible = "zmk,behavior-app-layer" in the keymap.
+ *
+ * Commas in the devicetree compatible become underscores
+ * in the C macro (zmk,behavior-app-layer -> zmk_behavior_app_layer).
+ */
+#define DT_DRV_COMPAT zmk_behavior_app_layer
+
+#include <zephyr/device.h>
+#include <zephyr/logging/log.h>
+#include <drivers/behavior.h>
+#include <zmk/event_manager.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/keymap.h>
+#include <zmk/behavior.h>
 
-#define DT_DRV_COMPAT zmk_behavior_app_layer
+LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /*
  * Shared variable defined in app_layer_sync.c.
@@ -89,6 +102,7 @@ static int behavior_app_layer_released(struct zmk_behavior_binding *binding,
  * ZMK behavior driver API.
  * Maps the press and release handlers so ZMK can call them
  * when the keymap binding &app_layer is triggered.
+ * struct behavior_driver_api is defined in <drivers/behavior.h>.
  */
 static const struct behavior_driver_api behavior_app_layer_api = {
     .binding_pressed  = behavior_app_layer_pressed,
@@ -107,56 +121,34 @@ static int behavior_app_layer_init(const struct device *dev)
 }
 
 /*
- * Devicetree compatible string for this behavior.
- * Must match the compatible property in the keymap node:
- *   compatible = "zmk,behavior-app-layer";
- *
- * Commas in the devicetree compatible become underscores
- * in the C macro (zmk,behavior-app-layer -> zmk_behavior_app_layer).
- */
-#define DT_DRV_COMPAT zmk_behavior_app_layer
-
-/*
- * Define the device instance directly using the node label.
+ * Register the behavior device instance.
  *
  * WHY NOT DT_INST_FOREACH_STATUS_OKAY:
- *   In Zephyr 4.1.0, DT_INST_FOREACH_STATUS_OKAY can fail to
- *   properly expand for custom behavior nodes declared in keymap
- *   overlay files. The macro ends up with a literal 'n' token
- *   instead of the instance number, causing:
- *     DT_N_INST_n_zmk_behavior_app_layer_FULL_NAME undeclared
+ *   In Zephyr 4.1.0, DT_INST_FOREACH_STATUS_OKAY fails to
+ *   properly expand for custom behavior nodes declared in
+ *   keymap overlay files. The macro produces a literal 'n'
+ *   token instead of instance number 0.
  *
  * WORKAROUND:
- *   We use DEVICE_DT_DEFINE with DT_NODELABEL(app_layer) to
- *   reference the node directly by its label, bypassing the
- *   DT_INST instance numbering system entirely.
+ *   We call BEHAVIOR_DT_INST_DEFINE(0, ...) directly with
+ *   instance number 0, wrapped in a DT_HAS_COMPAT_STATUS_OKAY
+ *   guard so the code is only compiled when the app_layer node
+ *   exists with status "okay" in the devicetree.
  *
- * The guard DT_HAS_COMPAT_STATUS_OKAY ensures this code is only
- * compiled when the app_layer node exists and has status "okay"
- * in the devicetree (i.e., when building the dongle firmware
- * which includes the keymap with this node).
+ * BEHAVIOR_DT_INST_DEFINE is a ZMK-specific macro (defined in
+ * <drivers/behavior.h>) that wraps Zephyr's DEVICE_DT_INST_DEFINE
+ * with ZMK-specific behavior setup.
  */
-#if DT_HAS_COMPAT_STATUS_OKAY(zmk_behavior_app_layer)
+#if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
 
-/*
- * Direct device definition using the node label from the keymap.
- * DEVICE_DT_DEFINE parameters:
- *   node_id   - the devicetree node (looked up by label "app_layer")
- *   init_fn   - initialization function called at boot
- *   pm_device - power management (NULL = none)
- *   data_ptr  - per-device data (NULL, we use static variable)
- *   config_ptr- per-device config (NULL, no config needed)
- *   level     - initialization level (POST_KERNEL)
- *   prio      - priority within level (CONFIG_KERNEL_INIT_PRIORITY_DEFAULT)
- *   api_ptr   - driver API struct (our behavior_app_layer_api)
- */
-DEVICE_DT_DEFINE(DT_NODELABEL(app_layer),
-                 behavior_app_layer_init,
-                 NULL,
-                 NULL,
-                 NULL,
-                 POST_KERNEL,
-                 CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,
-                 &behavior_app_layer_api);
+BEHAVIOR_DT_INST_DEFINE(
+    0,                              /* Instance number */
+    behavior_app_layer_init,        /* Init function called at boot */
+    NULL,                           /* Power management (none) */
+    NULL,                           /* Behavior data (none, using static) */
+    NULL,                           /* Behavior config (none needed) */
+    POST_KERNEL,                    /* Init level */
+    CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, /* Priority within level */
+    &behavior_app_layer_api);       /* Driver API with press/release handlers */
 
-#endif /* DT_HAS_COMPAT_STATUS_OKAY(zmk_behavior_app_layer) */
+#endif /* DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT) */
