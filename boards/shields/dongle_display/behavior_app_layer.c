@@ -17,6 +17,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zmk/behavior.h>
+#include <zmk/events/keycode_state_changed.h>
 #include <zmk/keymap.h>
 
 /*
@@ -52,6 +53,7 @@ static int behavior_app_layer_pressed(struct zmk_behavior_binding *binding,
          * App layer was active, deactivate it.
          * zmk_keymap_layer_deactivate() removes the layer
          * from the active layer stack.
+         * event.source identifies which half (left/right) triggered it.
          */
         zmk_keymap_layer_deactivate(active_app_layer, event.source);
         app_layer_is_active = false;
@@ -60,8 +62,9 @@ static int behavior_app_layer_pressed(struct zmk_behavior_binding *binding,
          * App layer was inactive, activate it.
          * zmk_keymap_layer_activate() pushes the layer
          * onto the active layer stack.
+         * event.source identifies which half (left/right) triggered it.
          */
-        zmk_keymap_layer_deactivate(active_app_layer, event.source);
+        zmk_keymap_layer_activate(active_app_layer, event.source);
         app_layer_is_active = true;
     }
 
@@ -108,7 +111,7 @@ static int behavior_app_layer_init(const struct device *dev)
  *   compatible = "zmk,behavior-app-layer";
  *
  * Commas in the devicetree compatible become underscores
- * in the C macro (zmk,behavior-app-layer → zmk_behavior_app_layer).
+ * in the C macro (zmk,behavior-app-layer -> zmk_behavior_app_layer).
  */
 #define DT_DRV_COMPAT zmk_behavior_app_layer
 
@@ -137,14 +140,14 @@ static int behavior_app_layer_init(const struct device *dev)
 /*
  * Direct device definition using the node label from the keymap.
  * DEVICE_DT_DEFINE parameters:
- *   node_id   — the devicetree node (looked up by label "app_layer")
- *   init_fn   — initialization function called at boot
- *   pm_device — power management (NULL = none)
- *   data_ptr  — per-device data (NULL, we use static variable)
- *   config_ptr— per-device config (NULL, no config needed)
- *   level     — initialization level (POST_KERNEL)
- *   prio      — priority within level (CONFIG_KERNEL_INIT_PRIORITY_DEFAULT)
- *   api_ptr   — driver API struct (our behavior_app_layer_api)
+ *   node_id   - the devicetree node (looked up by label "app_layer")
+ *   init_fn   - initialization function called at boot
+ *   pm_device - power management (NULL = none)
+ *   data_ptr  - per-device data (NULL, we use static variable)
+ *   config_ptr- per-device config (NULL, no config needed)
+ *   level     - initialization level (POST_KERNEL)
+ *   prio      - priority within level (CONFIG_KERNEL_INIT_PRIORITY_DEFAULT)
+ *   api_ptr   - driver API struct (our behavior_app_layer_api)
  */
 DEVICE_DT_DEFINE(DT_NODELABEL(app_layer),
                  behavior_app_layer_init,
