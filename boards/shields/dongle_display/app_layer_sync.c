@@ -1,101 +1,135 @@
 /*
  * app_layer_sync.c
  * 
- * Module central de synchronisation bidirectionnelle entre Selenite (Mac) et le clavier ZMK.
+ * Central module for bidirectional synchronization between Selenite (Mac) and the ZMK keyboard.
  * 
- * DEUX DIRECTIONS DE COMMUNICATION :
- * ────────────────────────────────────
- *   Mac ──→ Clavier  : Raw HID output report (reçu via raw_hid_received_event)
- *                       byte[0] = calque cible, byte[1] = auto, byte[2] = one-shot, byte[3..] = nom app
- *                       Géré par : on_raw_hid_received()
+ * TWO COMMUNICATION DIRECTIONS:
+ * ─────────────────────────────
+ *   Mac ──→ Keyboard : Raw HID output report (received via raw_hid_received_event)
+ *                     byte[0] = target layer, byte[1] = auto, byte[2] = one-shot, byte[3..] = app name
+ *                     Handled by: on_raw_hid_received()
  * 
- *   Clavier ──→ Mac  : Raw HID input report (envoyé via raw_hid_send())
- *                       byte[0] = calque actuellement actif sur le clavier
- *                       Déclenché par : tout changement de calque (zmk_layer_state_changed)
- *                       Géré par : send_active_layer_to_mac()
+ *   Keyboard ──→ Mac : Raw HID input report (sent via raise_raw_hid_sent_event)
+ *                     byte[0] = currently active layer on the keyboard
+ *                     Triggered by: any layer change (zmk_layer_state_changed)
+ *                     Handled by: send_active_layer_to_mac()
  * 
- * ARCHITECTURE DES CALQUES :
+ * LAYER STATE ARCHITECTURE:
  * ─────────────────────────
- *   current_app_layer  : Le calque que le Mac a demandé (stocké en mémoire).
- *                        Peut être 0 (base) ou un numéro de calque.
- *                        Ce calque n'est PAS forcément actif physiquement.
+ *   current_app_layer  : The layer the Mac has requested (stored in memory).
+ *                        Can be 0 (base) or a layer number.
+ *                        This layer is NOT necessarily physically active.
  * 
- *   active_app_layer   : Le calque qui est REELLEMENT activé sur le clavier.
- *                        Vaut 0 quand aucun calque d'app n'est activé.
- *                        Seul ce calque est visible par l'utilisateur.
+ *   active_app_layer   : The layer that is ACTUALLY active on the keyboard.
+ *                        0 when no app layer is activated.
+ *                        Only this layer is visible to the user.
+ *                        Shared with behavior_app_layer.c (extern).
  * 
- *   is_layer_persistent : Si false, le calque se désactive après UNE frappe (one-shot).
- *                         Si true, le calque reste actif indéfiniment jusqu'à action manuelle.
+ *   is_layer_persistent : If false, the layer deactivates after ONE keypress (one-shot).
+ *                         If true, the layer stays active indefinitely until manual action.
  * 
- * MODES DE FONCTIONNEMENT :
- * ────────────────────────
- *   Mode Auto     : Le calque est activé IMMÉDIATEMENT à la réception du message Mac.
- *                   Pas besoin d'appuyer sur F13.
+ * OPERATING MODES:
+ * ─────────────────
+ *   Auto Mode     : The layer is activated IMMEDIATELY upon receiving the Mac's message.
+ *                   No need to press &app_layer.
  * 
- *   Mode Manuel   : Le calque est seulement STOCKÉ en mémoire.
- *                   L'utilisateur doit appuyer sur F13 pour l'activer/désactiver.
+ *   Manual Mode   : The layer is only STORED in memory.
+ *                   The user must press &app_layer to activate/deactivate it.
  * 
- *   Mode One-shot : Le calque se désactive automatiquement après la prochaine frappe
- *                   (sauf les modificateurs : Cmd, Shift, Alt, Ctrl).
- *                   Compatible avec les modes Auto et Manuel.
+ *   One-shot Mode : The layer deactivates automatically after the next keypress
+ *                   (except modifiers: Cmd, Shift, Alt, Ctrl).
+ *                   Compatible with both Auto and Manual modes.
  */
 
+// Zephyr kernel (k_sem, threading, etc.)
 #include <zephyr/kernel.h>
+
+// ZMK event manager (ZMK_LISTENER, ZMK_SUBSCRIPTION, ZMK_EV_EVENT_BUBBLE, etc.)
 #include <zmk/event_manager.h>
+
+// Keycode event struct and casting (as_zmk_keycode_state_changed)
+// Used in Section 3 for F13 toggle and one-shot deactivation
 #include <zmk/events/keycode_state_changed.h>
+
+// Layer state changed event (zmk_layer_state_changed)
+// Used in Section 1 to detect when any layer changes on the keyboard
 #include <zmk/events/layer_state_changed.h>
+
+// zmk_keymap_layer_activate/deactivate/active, zmk_keymap_highest_layer_active
 #include <zmk/keymap.h>
+
+// ZMK HID definitions (not directly used but included for HID constants)
 #include <zmk/hid.h>
+
+// Raw HID event types from zmk-raw-hid module:
+//   struct raw_hid_received_event — Mac -> Keyboard (we read this)
+//   struct raw_hid_sent_event — Keyboard -> Mac (we raise this)
+//   raise_raw_hid_sent_event() — send an input report to the Mac
+//   as_raw_hid_received_event() — cast helper for received events
 #include <raw_hid/events.h>
 
+
 /* ==========================================================================
- * VARIABLES GLOBALES
+ * GLOBAL VARIABLES
  * ========================================================================== */
 
-// Le calque que le Mac nous a demandé d'activer.
-// Peut rester en mémoire sans être actif (mode Manuel).
-// Exemples : 0 = base (aucune app), 3 = calque Figma, 7 = calque Autocad
+// The layer the Mac has requested for the current app.
+// Stays in memory even when not physically active (Manual mode).
+// Examples: 0 = base (no app), 3 = Figma layer, 7 = Autocad layer
+// Read by behavior_app_layer.c to know which layer to toggle.
 uint8_t current_app_layer = 0;
 
-// Le calque qui est REELLEMENT actif sur le clavier en ce moment.
-// 0 = aucun calque d'app activé (on est sur la base).
-// >0 = un calque d'app est actuellement au-dessus de la base.
+// The layer that is ACTUALLY active on the keyboard right now.
+// 0 = no app layer active (user is on the base layer).
+// >0 = an app layer is currently overlaid on top of the base.
+// Updated by: this file AND behavior_app_layer.c (extern shared).
 uint8_t active_app_layer = 0;
 
-// Détermine si le calque doit rester activé après une frappe.
-// false = mode one-shot : une seule frappe puis retour à la base.
-// true  = mode persistant : le calque reste tant qu'on ne le désactive pas.
+// Whether the active layer should remain after a keypress.
+// false = one-shot mode: single keypress then return to base.
+// true  = persistent mode: layer stays until explicitly deactivated.
 bool is_layer_persistent = false;
 
 
 /* ==========================================================================
- * SECTION 1 : CLAVIER → MAC  (Envoi du calque actif)
+ * SECTION 1 : KEYBOARD → MAC  (Send active layer to Selenite)
  * ========================================================================== */
 
 /*
  * send_active_layer_to_mac()
  * 
- * Envoie un rapport Raw HID de 32 octets au Mac avec le calque actuellement actif.
+ * Sends a 32-byte Raw HID input report to the Mac with the currently active layer.
  * 
- * PROTOCOLE DU RAPPORT :
- *   byte[0]  = numéro du calque le plus haut actuellement actif (0 = base)
- *   byte[1..31] = réservé (mis à 0)
+ * PROTOCOL:
+ *   byte[0]      = highest active layer number (0 = base)
+ *   byte[1..31]  = reserved (set to 0)
  * 
- * Le Mac (HIDManager.swift) écoute ce rapport via IOHIDManagerRegisterInputReportCallback
- * et met à jour l'overlay (bulle + barre de menus) avec le vrai calque actif.
+ * The Mac (HIDManager.swift) listens for this report via
+ * IOHIDManagerRegisterInputReportCallback and updates the overlay
+ * (bubble + menu bar) with the real active layer.
  * 
- * UTILISÉ PAR : on_layer_state_changed() — appelé à CHAQUE changement de calque.
+ * IMPLEMENTATION:
+ *   Uses raise_raw_hid_sent_event() from the zmk-raw-hid module.
+ *   The module's internal USB listener catches this event and writes
+ *   the report to the USB HID endpoint. If the dongle is not connected
+ *   to the Mac, the send fails silently (no crash).
+ * 
+ * CALLED BY: on_layer_state_changed() — invoked on EVERY layer change.
  */
 static void send_active_layer_to_mac(void) {
+    // 32-byte report buffer, initialized to all zeros
     uint8_t report[32] = {0};
 
-    // zmk_keymap_highest_layer_active() retourne l'index du calque le plus élevé
-    // qui est actuellement actif. 0 = base, 1 = premier calque, etc.
+    // zmk_keymap_highest_layer_active() returns the index of the
+    // highest-numbered layer that is currently active.
+    // 0 = base, 1 = first layer, 2 = second layer, etc.
+    // This is the standard ZMK API for "what layer am I on right now".
     report[0] = zmk_keymap_highest_layer_active();
 
-    // raw_hid_send() vient du module zmk-raw-hid.
-    // Elle envoie un rapport HID input de 32 octets vers l'hôte (Mac).
-    // Si le dongle USB n'est pas connecté, l'appel échoue silencieusement.
+    // Raise the raw_hid_sent_event so the zmk-raw-hid module's
+    // USB listener (usb_hid.c) picks it up and sends it over USB.
+    // The .data field points to our local report buffer.
+    // The .length field tells the module how many bytes to send.
     raise_raw_hid_sent_event((struct raw_hid_sent_event){
         .data = report,
         .length = sizeof(report)
@@ -105,123 +139,148 @@ static void send_active_layer_to_mac(void) {
 /*
  * on_layer_state_changed()
  * 
- * Écouteur ZMK déclenché à CHAQUE changement de calque sur le clavier.
+ * ZMK event listener triggered on EVERY layer change on the keyboard.
  * 
- * Cela inclut TOUTES les sources de changement :
- *   - Activation/désactivation par notre module (auto, F13, one-shot)
- *   - Activation par une touche "MO" (momentary) dans le keymap
- *   - Activation par une touche "TO" (toggle) dans le keymap
- *   - Toute autre source de changement de calque
+ * This captures ALL sources of layer changes, including:
+ *   - Activation/deactivation by this module (auto, F13, one-shot)
+ *   - Activation by &app_layer behavior (behavior_app_layer.c)
+ *   - Activation by MO (momentary layer) keys in the keymap
+ *   - Activation by TO (toggle layer) keys in the keymap
+ *   - Any other ZMK mechanism that changes the active layer
  * 
- * À chaque changement, on informe le Mac du NOUVEAU calque actif.
- * Le Mac compare ce numéro avec ce qu'il pense et met à jour l'overlay.
+ * On every change, we inform the Mac of the NEW active layer.
+ * The Mac compares this number with its assumption and updates the overlay.
  * 
- * ZMK_EV_EVENT_BUBBLE : On laisse l'événement continuer vers les autres écouteurs
- * (notamment le widget layer_status.c qui affiche le calque sur l'écran OLED du dongle).
+ * ZMK_EV_EVENT_BUBBLE: We let the event continue to other listeners.
+ * This is critical — the layer_status.c widget (dongle OLED display)
+ * also subscribes to zmk_layer_state_changed and needs this event
+ * to update the layer name on screen.
  */
 static int on_layer_state_changed(const zmk_event_t *eh) {
-    // On informe le Mac du nouveau calque actif
+    // Send the new active layer number to the Mac
     send_active_layer_to_mac();
 
-    // On laisse l'événement se propager aux autres écouteurs ZMK
+    // Let the event propagate to other ZMK listeners
+    // (layer_status widget, dongle display, etc.)
     return ZMK_EV_EVENT_BUBBLE;
 }
 
-// Enregistrement de l'écouteur auprès du système d'événements ZMK.
-// "app_layer_report" est l'identifiant unique de cet écouteur.
+// Register the listener with ZMK's event system.
+// "app_layer_report" is the unique identifier for this listener.
 ZMK_LISTENER(app_layer_report, on_layer_state_changed);
-// On s'abonne aux changements de calque.
-// zmk_layer_state_changed est émis par ZMK à chaque activation/désactivation de calque.
+
+// Subscribe to layer state changes.
+// zmk_layer_state_changed is emitted by ZMK every time a layer
+// is activated or deactivated, regardless of the source.
 ZMK_SUBSCRIPTION(app_layer_report, zmk_layer_state_changed);
 
 
 /* ==========================================================================
- * SECTION 2 : MAC → CLAVIER  (Réception des commandes de calque)
+ * SECTION 2 : MAC → KEYBOARD  (Receive layer commands from Selenite)
  * ========================================================================== */
 
 /*
  * on_raw_hid_received()
  * 
- * Écouteur déclenché quand le Mac envoie un rapport Raw HID de 32 octets au clavier.
+ * ZMK event listener triggered when the Mac sends a 32-byte Raw HID output report.
  * 
- * PROTOCOLE DU RAPPORT REÇU :
- *   byte[0] = numéro du calque cible (0 = retour à la base)
- *   byte[1] = mode auto (1 = activer immédiatement, 0 = stocker en mémoire)
- *   byte[2] = mode one-shot (1 = désactiver après une frappe, 0 = persistant)
- *   byte[3..31] = nom de l'application (texte UTF-8, pas utilisé ici mais disponible)
+ * RECEIVED PROTOCOL:
+ *   byte[0]      = target layer number (0 = return to base)
+ *   byte[1]      = auto mode (1 = activate immediately, 0 = store in memory)
+ *   byte[2]      = one-shot mode (1 = deactivate after one keypress, 0 = persistent)
+ *   byte[3..31]  = application name (UTF-8 text, informational only, not used here)
  * 
- * LOGIQUE DE TRAITEMENT :
- *   1. Désactiver l'ancien calque d'app s'il était actif
- *   2. Selon le mode (auto/manual) :
- *      - Auto : activer le nouveau calque immédiatement
- *      - Manuel : juste le stocker, l'utilisateur activera via F13
- *   3. Informer le Mac du calque réellement actif (via send_active_layer_to_mac)
+ * PROCESSING LOGIC:
+ *   1. Deactivate the previous app layer if it was active
+ *   2. Based on the mode (auto/manual):
+ *      - Auto: activate the new layer immediately
+ *      - Manual: only store it, user activates via &app_layer
+ *   3. Inform the Mac of the actually active layer (via send_active_layer_to_mac)
+ * 
+ * IMPORTANT: We always call send_active_layer_to_mac() at the end, even for
+ * layer==0 where no ZMK layer change occurs. This ensures the Mac always
+ * gets a response, even if it's just "0" (base layer).
  */
 static int on_raw_hid_received(const zmk_event_t *eh) {
+    // Cast the generic event to the specific raw_hid_received_event type.
+    // Returns NULL if the event is not a raw HID received event.
     const struct raw_hid_received_event *ev = as_raw_hid_received_event(eh);
     if (ev == NULL) {
         return ZMK_EV_EVENT_BUBBLE;
     }
     
-    // --- Décodage du protocole ---
-    uint8_t layer = ev->data[0];           // Calque cible demandé par le Mac
-    bool is_auto = (ev->data[1] == 1);    // Mode auto : activation immédiate ?
-    bool is_one_shot = (ev->data[2] == 1);// Mode one-shot : désactivation après 1 frappe ?
+    // --- Decode the Selenite protocol ---
+    // Target layer number requested by the Mac (0 = base, 7 = Autocad, etc.)
+    uint8_t layer = ev->data[0];
+    // Auto mode: should we activate the layer immediately?
+    bool is_auto = (ev->data[1] == 1);
+    // One-shot mode: should we deactivate after one keypress?
+    bool is_one_shot = (ev->data[2] == 1);
     
-    // --- Étape 1 : Nettoyage de l'ancien calque ---
-    // Si un calque d'app était activé, on le désactive AVANT d'en activer un nouveau.
-    // Le paramètre "true" demande à ZMK de forcer la désactivation même si le calque
-    // est actif via un mécanisme ZMK standard (MO, TO, etc.)
+    // --- Step 1: Clean up the previous app layer ---
+    // If an app layer was previously active, deactivate it BEFORE
+    // activating a new one. This prevents layer stacking.
+    // The "true" parameter forces deactivation even if the layer was
+    // activated by a standard ZMK mechanism (MO, TO, etc.)
     if (active_app_layer > 0 && zmk_keymap_layer_active(active_app_layer)) {
         zmk_keymap_layer_deactivate(active_app_layer, true);
     }
     
-    // On réinitialise les états
-    active_app_layer = 0;       // Plus aucun calque d'app actif
-    is_layer_persistent = false; // Réinitialisation du mode persistant
+    // Reset state variables
+    active_app_layer = 0;        // No app layer is active anymore
+    is_layer_persistent = false;  // Reset persistence flag
     
-    // --- Étape 2 : Traitement du nouveau calque ---
+    // --- Step 2: Process the new layer command ---
     if (layer == 0) {
         // ──────────────────────────────────────────────
-        // CAS A : Retour à la base (aucune app spécifique)
+        // CASE A: Return to base (no app-specific layer)
         // ──────────────────────────────────────────────
-        // Le Mac nous dit "aucun calque d'app à activer".
-        // On réinitialise current_app_layer à 0.
-        // Le calque actif retombe à 0 (base) grâce à la désactivation ci-dessus.
+        // The Mac says "no app layer to activate".
+        // Reset current_app_layer to 0.
+        // The active layer falls back to 0 (base) via the deactivation above.
         current_app_layer = 0;
         
     } else if (is_auto) {
         // ──────────────────────────────────────────────
-        // CAS B : Mode Auto — activation immédiate
+        // CASE B: Auto mode — immediate activation
         // ──────────────────────────────────────────────
-        // Le Mac demande que le calque soit activé DIRECTEMENT, sans attendre F13.
-        // Typiquement utilisé quand l'utilisateur focus une app avec "Auto" coché.
+        // The Mac requests the layer to be activated DIRECTLY, no user action needed.
+        // Typically used when the user focuses an app with "Auto" checked in Selenite.
+        // This triggers zmk_layer_state_changed, which calls send_active_layer_to_mac.
         
-        zmk_keymap_layer_activate(layer, true); // Activation immédiate du calque
-        active_app_layer = layer;               // On mémorise qu'il est actif
-        current_app_layer = layer;               // On mémorise le calque demandé
-        is_layer_persistent = !is_one_shot;      // Persistant sauf si one-shot
+        // Activate the layer immediately
+        zmk_keymap_layer_activate(layer, true);
+        // Record that this layer is now physically active
+        active_app_layer = layer;
+        // Record the layer requested by the Mac
+        current_app_layer = layer;
+        // Persistent unless one-shot is enabled
+        is_layer_persistent = !is_one_shot;
         
     } else {
         // ──────────────────────────────────────────────
-        // CAS C : Mode Manuel — stockage en mémoire
+        // CASE C: Manual mode — store in memory only
         // ──────────────────────────────────────────────
-        // Le Mac nous dit "voici le calque pour cette app" mais on NE l'active pas.
-        // L'utilisateur devra appuyer sur F13 pour l'activer manuellement.
-        // Utile pour les apps où on ne veut pas changer de calque automatiquement.
+        // The Mac says "here's the layer for this app" but we do NOT activate it.
+        // The user must press &app_layer to activate it manually.
+        // Useful for apps where you don't want automatic layer switching.
         
-        current_app_layer = layer;               // On stocke le calque en mémoire
-        is_layer_persistent = !is_one_shot;      // Persistant sauf si one-shot
+        // Store the layer number for later activation by &app_layer
+        current_app_layer = layer;
+        // Persistent unless one-shot is enabled
+        is_layer_persistent = !is_one_shot;
     }
     
-    // --- Étape 3 : Informer le Mac du résultat ---
-    // Après avoir traité la commande, on envoie au Mac le calque RÉELLEMENT actif.
-    // En mode auto, le Mac recevra le nouveau calque.
-    // En mode manuel, le Mac recevra 0 (base) car on n'a rien activé.
-    // IMPORTANT : on_change_state_changed sera aussi déclenché par les
-    // zmk_keymap_layer_activate/deactivate ci-dessus, donc send_active_layer_to_mac
-    // sera appelé automatiquement. Mais on l'appelle aussi ici pour le cas layer==0
-    // où aucun changement de calque ZMK ne se produit.
+    // --- Step 3: Inform the Mac of the result ---
+    // After processing the command, we send the ACTUALLY active layer to the Mac.
+    // In auto mode, the Mac will receive the new layer number.
+    // In manual mode, the Mac will receive 0 (base) because we didn't activate anything.
+    //
+    // NOTE: on_layer_state_changed will also be triggered by the
+    // zmk_keymap_layer_activate/deactivate calls above, which will also
+    // call send_active_layer_to_mac(). But we call it here explicitly for
+    // the layer==0 case where no ZMK layer change occurs, ensuring the
+    // Mac always gets a response to its command.
     send_active_layer_to_mac();
     
     return ZMK_EV_EVENT_BUBBLE;
@@ -229,78 +288,81 @@ static int on_raw_hid_received(const zmk_event_t *eh) {
 
 
 /* ==========================================================================
- * SECTION 3 : GESTION DU CLAVIER  (F13 toggle + One-shot désactivation)
+ * SECTION 3 : KEYBOARD INPUT HANDLING  (F13 toggle + One-shot deactivation)
  * ========================================================================== */
 
 /*
  * on_keycode_state_changed()
  * 
- * Écouteur déclenché à CHAQUE touche pressée ou relâchée sur le clavier.
+ * ZMK event listener triggered on EVERY key press or release on the keyboard.
  * 
- * DEUX FONCTIONS :
- *   1. TOGGLE F13 : Si l'utilisateur appuie sur F13, on active/désactive
- *      le calque stocké dans current_app_layer (mode Manuel).
+ * TWO FUNCTIONS:
+ *   1. F13 TOGGLE: If the user presses F13, activate/deactivate the layer
+ *      stored in current_app_layer (Manual mode).
  * 
- *   2. ONE-SHOT : Si le calque actif est en mode one-shot (non persistant)
- *      et que l'utilisateur presse une touche ORDINAIRE (pas un modificateur),
- *      on désactive le calque après cette frappe.
+ *   2. ONE-SHOT: If the active layer is in non-persistent mode (one-shot)
+ *      and the user presses an ORDINARY key (not a modifier), deactivate
+ *      the layer after this keypress.
  * 
- * CODES HID DES MODIFICATEURS (usage page 0x07) :
+ * F13 is an alternative to &app_layer. Both achieve the same toggle.
+ * &app_layer uses behavior_app_layer.c, F13 uses this listener.
+ * They are mutually exclusive in the keymap (use one or the other).
+ * 
+ * HID MODIFIER KEY CODES (usage page 0x07):
  *   0xE0 = Left Ctrl,  0xE1 = Left Shift,  0xE2 = Left Alt,  0xE3 = Left GUI (Cmd)
  *   0xE4 = Right Ctrl, 0xE5 = Right Shift, 0xE6 = Right Alt, 0xE7 = Right GUI
  */
 static int on_keycode_state_changed(const zmk_event_t *eh) {
+    // Cast the generic event to a keycode state changed event.
     const struct zmk_keycode_state_changed *ev = as_zmk_keycode_state_changed(eh);
     
-    // On ignore les relâchements de touches et les événements invalides.
-    // On ne réagit qu'aux APPUIS (state == true).
+    // Ignore key releases and invalid events.
+    // We only react to key PRESSES (state == true).
     if (ev == NULL || !ev->state) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
     // ──────────────────────────────────────────
-    // FONCTION 1 : TOGGLE via F13 (keycode 0x68)
+    // FUNCTION 1: TOGGLE via F13 (keycode 0x68)
     // ──────────────────────────────────────────
-    // F13 est la touche programmée dans le keymap pour activer/désactiver
-    // le calque de l'app courante (mode Manuel).
-    // Usage page 0x07 = Generic Desktop / Keyboard, keycode 0x68 = F13.
+    // F13 is the key mapped in the keymap to toggle the current app layer.
+    // Usage page 0x07 = Keyboard/Keypad, keycode 0x68 = F13.
     if (ev->usage_page == 0x07 && ev->keycode == 0x68) {
         if (current_app_layer > 0 && active_app_layer == 0) {
-            // Aucun calque actif mais un calque est en mémoire → on l'ACTIVE
+            // No layer is active but a layer is stored in memory -> ACTIVATE it
+            // This triggers zmk_layer_state_changed -> send_active_layer_to_mac
             zmk_keymap_layer_activate(current_app_layer, true);
             active_app_layer = current_app_layer;
-            // send_active_layer_to_mac() sera appelé par on_layer_state_changed
-            // qui est déclenché par zmk_keymap_layer_activate
         } else if (active_app_layer > 0) {
-            // Un calque est actif → on le DÉSACTIVE (retour à la base)
+            // A layer is active -> DEACTIVATE it (return to base)
+            // This triggers zmk_layer_state_changed -> send_active_layer_to_mac
             zmk_keymap_layer_deactivate(active_app_layer, true);
             active_app_layer = 0;
-            // send_active_layer_to_mac() sera appelé par on_layer_state_changed
         }
-        // ZMK_EV_EVENT_HANDLED : On consomme l'événement F13 pour éviter
-        // qu'il soit traité comme une touche normale par ZMK.
-        // Sinon, F13 serait aussi envoyé au Mac en tant que frappe clavier.
+        // ZMK_EV_EVENT_HANDLED: We consume the F13 event to prevent it
+        // from being processed as a normal keypress by ZMK.
+        // Without this, F13 would be sent to the Mac as a regular keystroke.
         return ZMK_EV_EVENT_HANDLED;
     }
 
     // ──────────────────────────────────────────
-    // FONCTION 2 : ONE-SHOT (désactivation après 1 frappe)
+    // FUNCTION 2: ONE-SHOT (deactivate after 1 keypress)
     // ──────────────────────────────────────────
-    // Si un calque d'app est actif ET qu'il est en mode non-persistant (one-shot),
-    // on le désactive après la prochaine touche ordinaire.
+    // If an app layer is active AND it's in non-persistent mode (one-shot),
+    // deactivate it after the next ordinary keypress.
     if (active_app_layer > 0 && !is_layer_persistent) {
         
-        // Vérifie si la touche est un modificateur (Ctrl, Shift, Alt, Cmd/GUI).
-        // Les modificateurs NE déclenchent PAS la désactivation du calque one-shot.
-        // Cela permet de faire : Activer calque → Maintenir Cmd → Faire un raccourci
-        // sans que le calque se désactive trop tôt.
+        // Check if the pressed key is a modifier (Ctrl, Shift, Alt, Cmd/GUI).
+        // Modifiers do NOT trigger one-shot deactivation.
+        // This allows: Activate layer -> Hold Cmd -> Type a shortcut
+        // without the layer deactivating too early.
         bool is_mod = (ev->usage_page == 0x07 && ev->keycode >= 0xE0 && ev->keycode <= 0xE7);
         
         if (!is_mod) {
-            // Touche ordinaire : on désactive le calque one-shot
+            // Ordinary key pressed: deactivate the one-shot layer
+            // This triggers zmk_layer_state_changed -> send_active_layer_to_mac
             zmk_keymap_layer_deactivate(active_app_layer, true);
             active_app_layer = 0;
-            // send_active_layer_to_mac() sera appelé par on_layer_state_changed
         }
     }
 
@@ -309,17 +371,19 @@ static int on_keycode_state_changed(const zmk_event_t *eh) {
 
 
 /* ==========================================================================
- * ENREGISTREMENT DES ÉCOUTEURS ZMK
+ * ZMK EVENT LISTENER REGISTRATION
  * ========================================================================== */
 
-// Écouteur 1 : Réception des commandes Raw HID depuis le Mac
-// Identifiant : "app_layer_sync_hid"
-// Événement écouté : raw_hid_received_event (émis par le module zmk-raw-hid)
+// Listener 1: Receive Raw HID commands from the Mac.
+// Identifier: "app_layer_sync_hid"
+// Subscribed to: raw_hid_received_event (emitted by the zmk-raw-hid module
+// when the dongle receives a USB output report from the Mac).
 ZMK_LISTENER(app_layer_sync_hid, on_raw_hid_received);
 ZMK_SUBSCRIPTION(app_layer_sync_hid, raw_hid_received_event);
 
-// Écouteur 2 : Détection des touches pressées (F13 toggle + one-shot)
-// Identifiant : "app_layer_sync_key"
-// Événement écouté : zmk_keycode_state_changed (émis par ZMK à chaque frappe)
+// Listener 2: Detect physical key presses (F13 toggle + one-shot).
+// Identifier: "app_layer_sync_key"
+// Subscribed to: zmk_keycode_state_changed (emitted by ZMK on every
+// key press or release across the entire keyboard).
 ZMK_LISTENER(app_layer_sync_key, on_keycode_state_changed);
 ZMK_SUBSCRIPTION(app_layer_sync_key, zmk_keycode_state_changed);
