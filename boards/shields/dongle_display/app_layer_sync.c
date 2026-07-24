@@ -96,7 +96,10 @@ static void send_active_layer_to_mac(void) {
     // raw_hid_send() vient du module zmk-raw-hid.
     // Elle envoie un rapport HID input de 32 octets vers l'hôte (Mac).
     // Si le dongle USB n'est pas connecté, l'appel échoue silencieusement.
-    raw_hid_send(report, sizeof(report));
+    raise_raw_hid_sent_event((struct raw_hid_sent_event){
+        .data = report,
+        .length = sizeof(report)
+    });
 }
 
 /*
