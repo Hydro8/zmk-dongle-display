@@ -1,131 +1,158 @@
 /*
  * behavior_app_layer.c
- * 
- * Custom ZMK behavior: &app_layer
- * 
- * Toggle behavior for the current app layer.
- * Used in the keymap as &app_layer on a thumb key.
- * Press once to activate the layer, press again to deactivate.
- * 
- * IMPORTANT: This file shares state with app_layer_sync.c.
- * Both files read/write current_app_layer and active_app_layer.
- * Keeping them in sync is critical for correct operation.
- * 
- * When this behavior toggles a layer, zmk_layer_state_changed is fired,
- * which triggers app_layer_sync.c to send the new active layer to the Mac.
+ *
+ * Custom ZMK behavior that toggles the application-specific layer.
+ * Bound in the keymap with &app_layer on a thumb key.
+ *
+ * This behavior reads the shared active_app_layer variable (defined in
+ * app_layer_sync.c) to know WHICH layer to toggle, then activates or
+ * deactivates that layer via the ZMK keymap API.
+ *
+ * We intentionally avoid DT_INST_FOREACH_STATUS_OKAY because Zephyr 4.1.0
+ * fails to expand it correctly for custom behavior nodes declared in
+ * keymap overlay files. Instead we use DEVICE_DT_DEFINE with DT_NODELABEL
+ * which resolves the node directly by its label.
  */
 
+#include <zephyr/kernel.h>
 #include <zephyr/device.h>
-
-// ZMK behavior driver API (binding_pressed, binding_released)
-#include <drivers/behavior.h>
-
-// ZMK behavior utilities (ZMK_BEHAVIOR_OPAQUE, etc.)
 #include <zmk/behavior.h>
-
-// zmk_keymap_layer_active(), zmk_keymap_layer_activate/deactivate()
 #include <zmk/keymap.h>
 
-// ZMK event manager (required for behavior drivers)
-#include <zmk/event_manager.h>
-
-// Matches the compatible string in zmk,behavior-app-layer.yaml
-#define DT_DRV_COMPAT zmk_behavior_app_layer
-
-// =============================================================================
-// SHARED STATE (defined in app_layer_sync.c)
-// =============================================================================
-
-// The layer number the Mac has requested for the current app.
-// 0 = no app with a layer rule is focused.
-// >0 = a target layer is stored in memory.
-extern uint8_t current_app_layer;
-
-// The layer that is ACTUALLY active on the keyboard right now.
-// 0 = no app layer is active (base layer).
-// >0 = an app layer is currently overlaid on top of the base.
-// We update this variable to keep app_layer_sync.c in sync.
+/*
+ * Shared variable defined in app_layer_sync.c.
+ * Holds the layer number that the Mac requested via raw HID.
+ * Both this file and app_layer_sync.c read/write this value
+ * to stay in sync about which app layer should be active.
+ */
 extern uint8_t active_app_layer;
 
-#if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
+/*
+ * Static flag tracking whether the app layer is currently active.
+ * We use a module-level static instead of per-device data because
+ * there is only ever one instance of this behavior.
+ */
+static bool app_layer_is_active;
 
-// =============================================================================
-// INITIALIZATION
-// =============================================================================
-
-// Behavior driver init function. Required by ZMK but nothing to initialize.
-static int behavior_app_layer_init(const struct device *dev) { return 0; };
-
-// =============================================================================
-// TOGGLE BEHAVIOR (press to activate, press again to deactivate)
-// =============================================================================
-
-// Called when the user PRESSES the &app_layer key.
-//
-// Logic:
-//   - If current_app_layer is 0 (no app with a layer rule focused):
-//       Do nothing. Return ZMK_BEHAVIOR_OPAQUE (key consumed, no action).
-//
-//   - If the layer is currently active (zmk_keymap_layer_active returns true):
-//       Deactivate it and set active_app_layer = 0.
-//       This fires zmk_layer_state_changed -> app_layer_sync sends 0 to Mac.
-//
-//   - If the layer is NOT currently active:
-//       Activate it and set active_app_layer = current_app_layer.
-//       This fires zmk_layer_state_changed -> app_layer_sync sends the layer to Mac.
-//
-// NOTE: We update active_app_layer here so app_layer_sync.c's state stays
-// consistent. Without this, app_layer_sync.c would think no layer is active
-// even though we just activated one, causing desync.
-static int on_keymap_binding_pressed(struct zmk_behavior_binding *binding,
-                                     struct zmk_behavior_binding_event event) {
-    // Only act if the Mac has assigned a layer for the current app
-    if (current_app_layer > 0) {
-        if (zmk_keymap_layer_active(current_app_layer)) {
-            // Layer is currently active -> deactivate it (return to base)
-            zmk_keymap_layer_deactivate(current_app_layer, true);
-            // Keep app_layer_sync.c in sync
-            active_app_layer = 0;
-        } else {
-            // Layer is not active -> activate it
-            zmk_keymap_layer_activate(current_app_layer, true);
-            // Keep app_layer_sync.c in sync
-            active_app_layer = current_app_layer;
-        }
+/*
+ * Behavior keymap binding handler — triggered on key press.
+ *
+ * When the user presses the &app_layer key, this toggles the
+ * application-specific layer on or off:
+ *   - If currently active: deactivate active_app_layer
+ *   - If currently inactive: activate active_app_layer
+ *
+ * Returns ZMK_BEHAVIOR_OPAQUE to tell ZMK we handled the event.
+ */
+static int behavior_app_layer_pressed(struct zmk_behavior_binding *binding,
+                                       struct zmk_behavior_binding_event event)
+{
+    if (app_layer_is_active) {
+        /*
+         * App layer was active, deactivate it.
+         * zmk_keymap_layer_deactivate() removes the layer
+         * from the active layer stack.
+         */
+        zmk_keymap_layer_deactivate(active_app_layer);
+        app_layer_is_active = false;
+    } else {
+        /*
+         * App layer was inactive, activate it.
+         * zmk_keymap_layer_activate() pushes the layer
+         * onto the active layer stack.
+         */
+        zmk_keymap_layer_activate(active_app_layer);
+        app_layer_is_active = true;
     }
-    // ZMK_BEHAVIOR_OPAQUE: key is consumed, no further processing needed
+
     return ZMK_BEHAVIOR_OPAQUE;
 }
 
-// Called when the user RELEASES the &app_layer key.
-// Nothing to do — this is a toggle, not a momentary layer.
-static int on_keymap_binding_released(struct zmk_behavior_binding *binding,
-                                      struct zmk_behavior_binding_event event) {
+/*
+ * Behavior keymap binding handler — triggered on key release.
+ *
+ * Since this is a toggle behavior (not a hold), the release
+ * does nothing. We still must define it to satisfy the
+ * behavior_driver_api struct.
+ */
+static int behavior_app_layer_released(struct zmk_behavior_binding *binding,
+                                        struct zmk_behavior_binding_event event)
+{
     return ZMK_BEHAVIOR_OPAQUE;
 }
 
-// =============================================================================
-// DRIVER API TABLE (required by ZMK for all behavior drivers)
-// =============================================================================
-
-// Maps the ZMK behavior API to our functions above.
-// ZMK calls binding_pressed/binding_released through this table.
-static const struct behavior_driver_api behavior_app_layer_driver_api = {
-    .binding_pressed = on_keymap_binding_pressed,
-    .binding_released = on_keymap_binding_released,
+/*
+ * ZMK behavior driver API.
+ * Maps the press and release handlers so ZMK can call them
+ * when the keymap binding &app_layer is triggered.
+ */
+static const struct behavior_driver_api behavior_app_layer_api = {
+    .binding_pressed  = behavior_app_layer_pressed,
+    .binding_released = behavior_app_layer_released,
 };
 
-// =============================================================================
-// DEVICE INSTANTIATION (standard ZMK pattern for all drivers)
-// =============================================================================
+/*
+ * Device initialization function.
+ * Called once at POST_KERNEL priority during boot.
+ * Sets the initial state to inactive.
+ */
+static int behavior_app_layer_init(const struct device *dev)
+{
+    app_layer_is_active = false;
+    return 0;
+}
 
-// Creates a device instance for each devicetree node with
-// compatible = "zmk,behavior-app-layer" and status = "okay".
-// DT_INST_FOREACH_STATUS_OKAY iterates over all matching nodes.
-#define KP_INST(n)
-DEVICE_DT_INST_DEFINE(n, behavior_app_layer_init, NULL, NULL, NULL, POST_KERNEL,
-CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, &behavior_app_layer_driver_api);
+/*
+ * Devicetree compatible string for this behavior.
+ * Must match the compatible property in the keymap node:
+ *   compatible = "zmk,behavior-app-layer";
+ *
+ * Commas in the devicetree compatible become underscores
+ * in the C macro (zmk,behavior-app-layer → zmk_behavior_app_layer).
+ */
+#define DT_DRV_COMPAT zmk_behavior_app_layer
 
-DT_INST_FOREACH_STATUS_OKAY(KP_INST)
+/*
+ * Define the device instance directly using the node label.
+ *
+ * WHY NOT DT_INST_FOREACH_STATUS_OKAY:
+ *   In Zephyr 4.1.0, DT_INST_FOREACH_STATUS_OKAY can fail to
+ *   properly expand for custom behavior nodes declared in keymap
+ *   overlay files. The macro ends up with a literal 'n' token
+ *   instead of the instance number, causing:
+ *     DT_N_INST_n_zmk_behavior_app_layer_FULL_NAME undeclared
+ *
+ * WORKAROUND:
+ *   We use DEVICE_DT_DEFINE with DT_NODELABEL(app_layer) to
+ *   reference the node directly by its label, bypassing the
+ *   DT_INST instance numbering system entirely.
+ *
+ * The guard DT_HAS_COMPAT_STATUS_OKAY ensures this code is only
+ * compiled when the app_layer node exists and has status "okay"
+ * in the devicetree (i.e., when building the dongle firmware
+ * which includes the keymap with this node).
+ */
+#if DT_HAS_COMPAT_STATUS_OKAY(zmk_behavior_app_layer)
 
-#endif
+/*
+ * Direct device definition using the node label from the keymap.
+ * DEVICE_DT_DEFINE parameters:
+ *   node_id   — the devicetree node (looked up by label "app_layer")
+ *   init_fn   — initialization function called at boot
+ *   pm_device — power management (NULL = none)
+ *   data_ptr  — per-device data (NULL, we use static variable)
+ *   config_ptr— per-device config (NULL, no config needed)
+ *   level     — initialization level (POST_KERNEL)
+ *   prio      — priority within level (CONFIG_KERNEL_INIT_PRIORITY_DEFAULT)
+ *   api_ptr   — driver API struct (our behavior_app_layer_api)
+ */
+DEVICE_DT_DEFINE(DT_NODELABEL(app_layer),
+                 behavior_app_layer_init,
+                 NULL,
+                 NULL,
+                 NULL,
+                 POST_KERNEL,
+                 CONFIG_KERNEL_INIT_PRIORITY_DEFAULT,
+                 &behavior_app_layer_api);
+
+#endif /* DT_HAS_COMPAT_STATUS_OKAY(zmk_behavior_app_layer) */
