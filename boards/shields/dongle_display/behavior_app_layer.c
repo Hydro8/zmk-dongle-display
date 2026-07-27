@@ -62,10 +62,20 @@ static bool app_layer_is_active;
 static int behavior_app_layer_pressed(struct zmk_behavior_binding *binding,
                                        struct zmk_behavior_binding_event event)
 {
-    // On s'assure qu'un calque d'application est bien défini
+    // On s'assure qu'un calque d'application valide est demandé par le Mac
     if (active_app_layer > 0) {
-        // ZMK gère tout seul si le calque est déjà actif ou non !
-        zmk_keymap_layer_toggle(active_app_layer);
+        /*
+         * Au lieu d'utiliser un booléen statique (qui se désynchronise quand 
+         * vous changez d'application sans appuyer sur la touche), on demande 
+         * directement à ZMK si le calque est actuellement actif.
+         */
+        if (zmk_keymap_layer_active(active_app_layer)) {
+            // Si actif, on le désactive (on revient à la base)
+            zmk_keymap_layer_deactivate(active_app_layer, event.source);
+        } else {
+            // Si inactif, on l'active
+            zmk_keymap_layer_activate(active_app_layer, event.source);
+        }
     }
 
     return ZMK_BEHAVIOR_OPAQUE;
