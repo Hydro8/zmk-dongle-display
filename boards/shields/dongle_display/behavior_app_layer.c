@@ -62,24 +62,10 @@ static bool app_layer_is_active;
 static int behavior_app_layer_pressed(struct zmk_behavior_binding *binding,
                                        struct zmk_behavior_binding_event event)
 {
-    if (app_layer_is_active) {
-        /*
-         * App layer was active, deactivate it.
-         * zmk_keymap_layer_deactivate() removes the layer
-         * from the active layer stack.
-         * event.source identifies which half (left/right) triggered it.
-         */
-        zmk_keymap_layer_deactivate(active_app_layer, event.source);
-        app_layer_is_active = false;
-    } else {
-        /*
-         * App layer was inactive, activate it.
-         * zmk_keymap_layer_activate() pushes the layer
-         * onto the active layer stack.
-         * event.source identifies which half (left/right) triggered it.
-         */
-        zmk_keymap_layer_activate(active_app_layer, event.source);
-        app_layer_is_active = true;
+    // On s'assure qu'un calque d'application est bien défini
+    if (active_app_layer > 0) {
+        // ZMK gère tout seul si le calque est déjà actif ou non !
+        zmk_keymap_layer_toggle(active_app_layer);
     }
 
     return ZMK_BEHAVIOR_OPAQUE;
