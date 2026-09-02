@@ -1,389 +1,335 @@
-/*
- * app_layer_sync.c
- * 
- * Central module for bidirectional synchronization between Selenite (Mac) and the ZMK keyboard.
- * 
- * TWO COMMUNICATION DIRECTIONS:
- * ─────────────────────────────
- *   Mac ──→ Keyboard : Raw HID output report (received via raw_hid_received_event)
- *                     byte[0] = target layer, byte[1] = auto, byte[2] = one-shot, byte[3..] = app name
- *                     Handled by: on_raw_hid_received()
- * 
- *   Keyboard ──→ Mac : Raw HID input report (sent via raise_raw_hid_sent_event)
- *                     byte[0] = currently active layer on the keyboard
- *                     Triggered by: any layer change (zmk_layer_state_changed)
- *                     Handled by: send_active_layer_to_mac()
- * 
- * LAYER STATE ARCHITECTURE:
- * ─────────────────────────
- *   current_app_layer  : The layer the Mac has requested (stored in memory).
- *                        Can be 0 (base) or a layer number.
- *                        This layer is NOT necessarily physically active.
- * 
- *   active_app_layer   : The layer that is ACTUALLY active on the keyboard.
- *                        0 when no app layer is activated.
- *                        Only this layer is visible to the user.
- *                        Shared with behavior_app_layer.c (extern).
- * 
- *   is_layer_persistent : If false, the layer deactivates after ONE keypress (one-shot).
- *                         If true, the layer stays active indefinitely until manual action.
- * 
- * OPERATING MODES:
- * ─────────────────
- *   Auto Mode     : The layer is activated IMMEDIATELY upon receiving the Mac's message.
- *                   No need to press &app_layer.
- * 
- *   Manual Mode   : The layer is only STORED in memory.
- *                   The user must press &app_layer to activate/deactivate it.
- * 
- *   One-shot Mode : The layer deactivates automatically after the next keypress
- *                   (except modifiers: Cmd, Shift, Alt, Ctrl).
- *                   Compatible with both Auto and Manual modes.
- */
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 
-// Zephyr kernel (k_sem, threading, etc.)
 #include <zephyr/kernel.h>
+#include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/util.h>
 
-// ZMK event manager (ZMK_LISTENER, ZMK_SUBSCRIPTION, ZMK_EV_EVENT_BUBBLE, etc.)
 #include <zmk/event_manager.h>
-
-// Keycode event struct and casting (as_zmk_keycode_state_changed)
-// Used in Section 3 for F13 toggle and one-shot deactivation
 #include <zmk/events/keycode_state_changed.h>
-
-// Layer state changed event (zmk_layer_state_changed)
-// Used in Section 1 to detect when any layer changes on the keyboard
 #include <zmk/events/layer_state_changed.h>
-
-// zmk_keymap_layer_activate/deactivate/active, zmk_keymap_highest_layer_active
 #include <zmk/keymap.h>
 
-// ZMK HID definitions (not directly used but included for HID constants)
-#include <zmk/hid.h>
-
-// Raw HID event types from zmk-raw-hid module:
-//   struct raw_hid_received_event — Mac -> Keyboard (we read this)
-//   struct raw_hid_sent_event — Keyboard -> Mac (we raise this)
-//   raise_raw_hid_sent_event() — send an input report to the Mac
-//   as_raw_hid_received_event() — cast helper for received events
 #include <raw_hid/events.h>
 
+#define AEK_REPORT_SIZE 32
+#define AEK_HEADER_SIZE 8
+#define AEK_MAX_PAYLOAD 24
+#define AEK_MAGIC 0xAE
+#define AEK_MAJOR 1
+#define AEK_MINOR 0
+#define AEK_NONE_REF 0xFF
 
-/* ==========================================================================
- * GLOBAL VARIABLES
- * ========================================================================== */
+#define AEK_MSG_HELLO 0x01
+#define AEK_MSG_GET_STATE 0x02
+#define AEK_MSG_SET_LAYER_INTENT 0x10
+#define AEK_MSG_STATE_SNAPSHOT 0x80
+#define AEK_MSG_HELLO_ACK 0x81
+#define AEK_MSG_ACK 0x90
+#define AEK_MSG_NACK 0x91
 
-// The layer the Mac has requested for the current app.
-// Stays in memory even when not physically active (Manual mode).
-// Examples: 0 = base (no app), 3 = Figma layer, 7 = Autocad layer
-// Read by behavior_app_layer.c to know which layer to toggle.
+#define AEK_INTENT_ACTIVATE_NOW BIT(0)
+#define AEK_INTENT_ONE_SHOT BIT(1)
+#define AEK_INTENT_KNOWN_MASK (AEK_INTENT_ACTIVATE_NOW | AEK_INTENT_ONE_SHOT)
+
+#define AEK_ERR_MALFORMED 1
+#define AEK_ERR_UNSUPPORTED_VERSION 2
+#define AEK_ERR_UNKNOWN_TYPE 3
+#define AEK_ERR_INVALID_LAYER 4
+#define AEK_ERR_NOT_NEGOTIATED 5
+#define AEK_ERR_INVALID_FLAGS 6
+
+#define AEK_CAP_STATE_SNAPSHOT BIT(0)
+#define AEK_CAP_LAYER_INTENT BIT(1)
+#define AEK_CAP_LEGACY_COMPAT BIT(2)
+
+struct aek_layer_map {
+    const char *layer_id;
+    uint8_t wire_ref;
+    zmk_keymap_layer_id_t zmk_id;
+};
+
+/* Explicit catalog: host persistence uses layer_id; the wire uses wire_ref;
+ * firmware resolves wire_ref to the current ZMK layer id. Numeric equality is incidental. */
+static const struct aek_layer_map layer_map[] = {
+    {"base", 0, 0}, {"num-lock", 1, 1}, {"symbols", 2, 2}, {"vim-nav", 3, 3},
+    {"nav-num", 4, 4}, {"num-row", 5, 5}, {"fn-media", 6, 6},
+    {"app-autocad", 7, 7}, {"app-word", 8, 8}, {"app-excel", 9, 9}, {"app-calc", 10, 10},
+};
+
+/* Shared with behavior_app_layer.c. These are internal ZMK ids, never wire identities. */
 uint8_t current_app_layer = 0;
-
-// The layer that is ACTUALLY active on the keyboard right now.
-// 0 = no app layer active (user is on the base layer).
-// >0 = an app layer is currently overlaid on top of the base.
-// Updated by: this file AND behavior_app_layer.c (extern shared).
 uint8_t active_app_layer = 0;
-
-// Whether the active layer should remain after a keypress.
-// false = one-shot mode: single keypress then return to base.
-// true  = persistent mode: layer stays until explicitly deactivated.
 bool is_layer_persistent = false;
 
+static bool v1_negotiated;
+static uint16_t session_id;
+static uint16_t state_revision;
+static uint32_t host_nonce;
+static uint8_t smart_app_selected_ref = AEK_NONE_REF;
 
-/* ==========================================================================
- * SECTION 1 : KEYBOARD → MAC  (Send active layer to Selenite)
- * ========================================================================== */
+static const struct aek_layer_map *map_from_ref(uint8_t ref) {
+    for (size_t i = 0; i < ARRAY_SIZE(layer_map); i++) {
+        if (layer_map[i].wire_ref == ref) {
+            return &layer_map[i];
+        }
+    }
+    return NULL;
+}
 
-/*
- * send_active_layer_to_mac()
- * 
- * Sends a 32-byte Raw HID input report to the Mac with the currently active layer.
- * 
- * PROTOCOL:
- *   byte[0]      = highest active layer number (0 = base)
- *   byte[1..31]  = reserved (set to 0)
- * 
- * The Mac (HIDManager.swift) listens for this report via
- * IOHIDManagerRegisterInputReportCallback and updates the overlay
- * (bubble + menu bar) with the real active layer.
- * 
- * IMPLEMENTATION:
- *   Uses raise_raw_hid_sent_event() from the zmk-raw-hid module.
- *   The module's internal USB listener catches this event and writes
- *   the report to the USB HID endpoint. If the dongle is not connected
- *   to the Mac, the send fails silently (no crash).
- * 
- * CALLED BY: on_layer_state_changed() — invoked on EVERY layer change.
- */
-static void send_active_layer_to_mac(void) {
-    // 32-byte report buffer, initialized to all zeros
-    uint8_t report[32] = {0};
+static uint8_t ref_from_zmk_id(zmk_keymap_layer_id_t id) {
+    for (size_t i = 0; i < ARRAY_SIZE(layer_map); i++) {
+        if (layer_map[i].zmk_id == id) {
+            return layer_map[i].wire_ref;
+        }
+    }
+    return AEK_NONE_REF;
+}
 
-    // zmk_keymap_highest_layer_active() returns the index of the
-    // highest-numbered layer that is currently active.
-    // 0 = base, 1 = first layer, 2 = second layer, etc.
-    // This is the standard ZMK API for "what layer am I on right now".
+static void send_frame(uint8_t type, uint16_t sequence, const uint8_t *payload, uint8_t length) {
+    uint8_t report[AEK_REPORT_SIZE] = {0};
+    report[0] = AEK_MAGIC;
+    report[1] = AEK_MAJOR;
+    report[2] = AEK_MINOR;
+    report[3] = type;
+    report[4] = 0;
+    report[5] = length;
+    sys_put_le16(sequence, &report[6]);
+    if (payload != NULL && length > 0 && length <= AEK_MAX_PAYLOAD) {
+        memcpy(&report[AEK_HEADER_SIZE], payload, length);
+    }
+    raise_raw_hid_sent_event((struct raw_hid_sent_event){.data = report, .length = sizeof(report)});
+}
+
+static void send_ack(uint16_t sequence, uint8_t accepted_type) {
+    uint8_t payload[1] = {accepted_type};
+    send_frame(AEK_MSG_ACK, sequence, payload, sizeof(payload));
+}
+
+static void send_nack(uint16_t sequence, uint8_t rejected_type, uint8_t error) {
+    uint8_t payload[2] = {rejected_type, error};
+    send_frame(AEK_MSG_NACK, sequence, payload, sizeof(payload));
+}
+
+static void build_active_bitmap(uint8_t bitmap[16]) {
+    memset(bitmap, 0, 16);
+    for (size_t i = 0; i < ARRAY_SIZE(layer_map); i++) {
+        const struct aek_layer_map *entry = &layer_map[i];
+        if (zmk_keymap_layer_active(entry->zmk_id)) {
+            bitmap[entry->wire_ref / 8] |= BIT(entry->wire_ref % 8);
+        }
+    }
+}
+
+static void send_state_snapshot(uint16_t sequence) {
+    uint8_t payload[24] = {0};
+    uint8_t bitmap[16];
+    zmk_keymap_layer_index_t highest_index = zmk_keymap_highest_layer_active();
+    zmk_keymap_layer_id_t highest_id = zmk_keymap_layer_index_to_id(highest_index);
+    uint8_t highest_ref = ref_from_zmk_id(highest_id);
+
+    build_active_bitmap(bitmap);
+    state_revision++;
+    sys_put_le16(state_revision, &payload[0]);
+    payload[2] = 1;
+    payload[3] = 1; /* local/dongle state available; aggregate BLE detail remains a later gate */
+    payload[4] = highest_ref;
+    payload[5] = smart_app_selected_ref;
+    payload[6] = 16;
+    memcpy(&payload[7], bitmap, sizeof(bitmap));
+    payload[23] = 0;
+    send_frame(AEK_MSG_STATE_SNAPSHOT, sequence, payload, sizeof(payload));
+}
+
+static void send_hello_ack(uint16_t sequence) {
+    uint8_t payload[14] = {0};
+    uint16_t capabilities = AEK_CAP_STATE_SNAPSHOT | AEK_CAP_LAYER_INTENT;
+#if IS_ENABLED(CONFIG_AEKLIPSE_HID_LEGACY_COMPAT)
+    capabilities |= AEK_CAP_LEGACY_COMPAT;
+#endif
+    sys_put_le32(host_nonce, &payload[0]);
+    sys_put_le16(session_id, &payload[4]);
+    sys_put_le16(capabilities, &payload[6]);
+    sys_put_le16(1, &payload[8]);
+    sys_put_le32(0x53454C31u, &payload[10]); /* SEL1 catalog fingerprint */
+    send_frame(AEK_MSG_HELLO_ACK, sequence, payload, sizeof(payload));
+}
+
+static void clear_smart_app_owned_layer(void) {
+    if (active_app_layer > 0 && zmk_keymap_layer_active(active_app_layer)) {
+        zmk_keymap_layer_deactivate(active_app_layer, false);
+    }
+    active_app_layer = 0;
+    is_layer_persistent = false;
+}
+
+static int apply_layer_intent(uint8_t ref, uint8_t flags) {
+    const struct aek_layer_map *entry = map_from_ref(ref);
+    if (entry == NULL) {
+        return -AEK_ERR_INVALID_LAYER;
+    }
+    if ((flags & ~AEK_INTENT_KNOWN_MASK) != 0) {
+        return -AEK_ERR_INVALID_FLAGS;
+    }
+
+    clear_smart_app_owned_layer();
+    current_app_layer = entry->zmk_id;
+    smart_app_selected_ref = (ref == 0) ? AEK_NONE_REF : ref;
+
+    if (ref == 0) {
+        current_app_layer = 0;
+        return 0;
+    }
+
+    is_layer_persistent = (flags & AEK_INTENT_ONE_SHOT) == 0;
+    if ((flags & AEK_INTENT_ACTIVATE_NOW) != 0) {
+        zmk_keymap_layer_activate(entry->zmk_id, false);
+        active_app_layer = entry->zmk_id;
+    }
+    return 0;
+}
+
+static void handle_v1(const struct raw_hid_received_event *ev) {
+    const uint8_t *data = ev->data;
+    uint8_t type = data[3];
+    uint8_t flags = data[4];
+    uint8_t payload_len = data[5];
+    uint16_t sequence = sys_get_le16(&data[6]);
+
+    if (data[1] != AEK_MAJOR || data[2] > AEK_MINOR) {
+        send_nack(sequence, type, AEK_ERR_UNSUPPORTED_VERSION);
+        return;
+    }
+    if (flags != 0 || payload_len > AEK_MAX_PAYLOAD) {
+        send_nack(sequence, type, AEK_ERR_MALFORMED);
+        return;
+    }
+
+    const uint8_t *payload = &data[AEK_HEADER_SIZE];
+    switch (type) {
+    case AEK_MSG_HELLO:
+        if (payload_len != 4) {
+            send_nack(sequence, type, AEK_ERR_MALFORMED);
+            return;
+        }
+        host_nonce = sys_get_le32(payload);
+        session_id++;
+        if (session_id == 0) {
+            session_id = 1;
+        }
+        state_revision = 0;
+        v1_negotiated = true;
+        send_hello_ack(sequence);
+        send_state_snapshot(sequence);
+        return;
+    case AEK_MSG_GET_STATE:
+        if (!v1_negotiated) {
+            send_nack(sequence, type, AEK_ERR_NOT_NEGOTIATED);
+        } else if (payload_len != 0) {
+            send_nack(sequence, type, AEK_ERR_MALFORMED);
+        } else {
+            send_state_snapshot(sequence);
+        }
+        return;
+    case AEK_MSG_SET_LAYER_INTENT:
+        if (!v1_negotiated) {
+            send_nack(sequence, type, AEK_ERR_NOT_NEGOTIATED);
+            return;
+        }
+        if (payload_len != 2) {
+            send_nack(sequence, type, AEK_ERR_MALFORMED);
+            return;
+        }
+        {
+            int rc = apply_layer_intent(payload[0], payload[1]);
+            if (rc < 0) {
+                send_nack(sequence, type, (uint8_t)(-rc));
+            } else {
+                send_ack(sequence, type);
+                send_state_snapshot(sequence);
+            }
+        }
+        return;
+    default:
+        send_nack(sequence, type, AEK_ERR_UNKNOWN_TYPE);
+        return;
+    }
+}
+
+#if IS_ENABLED(CONFIG_AEKLIPSE_HID_LEGACY_COMPAT)
+static bool handle_legacy(const struct raw_hid_received_event *ev) {
+    if (ev->length != AEK_REPORT_SIZE || ev->data[1] > 1 || ev->data[2] > 1) {
+        return false;
+    }
+    uint8_t ref = ref_from_zmk_id(ev->data[0]);
+    if (ref == AEK_NONE_REF) {
+        return false;
+    }
+    uint8_t flags = ev->data[1] ? AEK_INTENT_ACTIVATE_NOW : 0;
+    if (ev->data[2]) {
+        flags |= AEK_INTENT_ONE_SHOT;
+    }
+    (void)apply_layer_intent(ref, flags);
+
+    uint8_t report[AEK_REPORT_SIZE] = {0};
     report[0] = zmk_keymap_highest_layer_active();
-
-    // Raise the raw_hid_sent_event so the zmk-raw-hid module's
-    // USB listener (usb_hid.c) picks it up and sends it over USB.
-    // The .data field points to our local report buffer.
-    // The .length field tells the module how many bytes to send.
-    raise_raw_hid_sent_event((struct raw_hid_sent_event){
-        .data = report,
-        .length = sizeof(report)
-    });
+    raise_raw_hid_sent_event((struct raw_hid_sent_event){.data = report, .length = sizeof(report)});
+    return true;
 }
+#endif
 
-/*
- * on_layer_state_changed()
- * 
- * ZMK event listener triggered on EVERY layer change on the keyboard.
- * 
- * This captures ALL sources of layer changes, including:
- *   - Activation/deactivation by this module (auto, F13, one-shot)
- *   - Activation by &app_layer behavior (behavior_app_layer.c)
- *   - Activation by MO (momentary layer) keys in the keymap
- *   - Activation by TO (toggle layer) keys in the keymap
- *   - Any other ZMK mechanism that changes the active layer
- * 
- * On every change, we inform the Mac of the NEW active layer.
- * The Mac compares this number with its assumption and updates the overlay.
- * 
- * ZMK_EV_EVENT_BUBBLE: We let the event continue to other listeners.
- * This is critical — the layer_status.c widget (dongle OLED display)
- * also subscribes to zmk_layer_state_changed and needs this event
- * to update the layer name on screen.
- */
-static int on_layer_state_changed(const zmk_event_t *eh) {
-    // Send the new active layer number to the Mac
-    send_active_layer_to_mac();
-
-    // Let the event propagate to other ZMK listeners
-    // (layer_status widget, dongle display, etc.)
-    return ZMK_EV_EVENT_BUBBLE;
-}
-
-// Register the listener with ZMK's event system.
-// "app_layer_report" is the unique identifier for this listener.
-ZMK_LISTENER(app_layer_report, on_layer_state_changed);
-
-// Subscribe to layer state changes.
-// zmk_layer_state_changed is emitted by ZMK every time a layer
-// is activated or deactivated, regardless of the source.
-ZMK_SUBSCRIPTION(app_layer_report, zmk_layer_state_changed);
-
-
-/* ==========================================================================
- * SECTION 2 : MAC → KEYBOARD  (Receive layer commands from Selenite)
- * ========================================================================== */
-
-/*
- * on_raw_hid_received()
- * 
- * ZMK event listener triggered when the Mac sends a 32-byte Raw HID output report.
- * 
- * RECEIVED PROTOCOL:
- *   byte[0]      = target layer number (0 = return to base)
- *   byte[1]      = auto mode (1 = activate immediately, 0 = store in memory)
- *   byte[2]      = one-shot mode (1 = deactivate after one keypress, 0 = persistent)
- *   byte[3..31]  = application name (UTF-8 text, informational only, not used here)
- * 
- * PROCESSING LOGIC:
- *   1. Deactivate the previous app layer if it was active
- *   2. Based on the mode (auto/manual):
- *      - Auto: activate the new layer immediately
- *      - Manual: only store it, user activates via &app_layer
- *   3. Inform the Mac of the actually active layer (via send_active_layer_to_mac)
- * 
- * IMPORTANT: We always call send_active_layer_to_mac() at the end, even for
- * layer==0 where no ZMK layer change occurs. This ensures the Mac always
- * gets a response, even if it's just "0" (base layer).
- */
 static int on_raw_hid_received(const zmk_event_t *eh) {
-    // Cast the generic event to the specific raw_hid_received_event type.
-    // Returns NULL if the event is not a raw HID received event.
     const struct raw_hid_received_event *ev = as_raw_hid_received_event(eh);
-    if (ev == NULL) {
+    if (ev == NULL || ev->data == NULL || ev->length != AEK_REPORT_SIZE) {
         return ZMK_EV_EVENT_BUBBLE;
     }
-    
-    // --- Decode the Selenite protocol ---
-    // Target layer number requested by the Mac (0 = base, 7 = Autocad, etc.)
-    uint8_t layer = ev->data[0];
-    // Auto mode: should we activate the layer immediately?
-    bool is_auto = (ev->data[1] == 1);
-    // One-shot mode: should we deactivate after one keypress?
-    bool is_one_shot = (ev->data[2] == 1);
-    
-    // --- Step 1: Clean up the previous app layer ---
-    // If an app layer was previously active, deactivate it BEFORE
-    // activating a new one. This prevents layer stacking.
-    // The "true" parameter forces deactivation even if the layer was
-    // activated by a standard ZMK mechanism (MO, TO, etc.)
-    if (active_app_layer > 0 && zmk_keymap_layer_active(active_app_layer)) {
-        zmk_keymap_layer_deactivate(active_app_layer, true);
+    if (ev->data[0] == AEK_MAGIC) {
+        handle_v1(ev);
+        return ZMK_EV_EVENT_BUBBLE;
     }
-    
-    // Reset state variables
-    active_app_layer = 0;        // No app layer is active anymore
-    is_layer_persistent = false;  // Reset persistence flag
-    
-    // --- Step 2: Process the new layer command ---
-    if (layer == 0) {
-        // ──────────────────────────────────────────────
-        // CASE A: Return to base (no app-specific layer)
-        // ──────────────────────────────────────────────
-        // The Mac says "no app layer to activate".
-        // Reset current_app_layer to 0.
-        // The active layer falls back to 0 (base) via the deactivation above.
-        current_app_layer = 0;
-        
-    } else if (is_auto) {
-        // ──────────────────────────────────────────────
-        // CASE B: Auto mode — immediate activation
-        // ──────────────────────────────────────────────
-        // The Mac requests the layer to be activated DIRECTLY, no user action needed.
-        // Typically used when the user focuses an app with "Auto" checked in Selenite.
-        // This triggers zmk_layer_state_changed, which calls send_active_layer_to_mac.
-        
-        // Activate the layer immediately
-        zmk_keymap_layer_activate(layer, true);
-        // Record that this layer is now physically active
-        active_app_layer = layer;
-        // Record the layer requested by the Mac
-        current_app_layer = layer;
-        // Persistent unless one-shot is enabled
-        is_layer_persistent = !is_one_shot;
-        
-    } else {
-        // ──────────────────────────────────────────────
-        // CASE C: Manual mode — store in memory only
-        // ──────────────────────────────────────────────
-        // The Mac says "here's the layer for this app" but we do NOT activate it.
-        // The user must press &app_layer to activate it manually.
-        // Useful for apps where you don't want automatic layer switching.
-        
-        // Store the layer number for later activation by &app_layer
-        current_app_layer = layer;
-        // Persistent unless one-shot is enabled
-        is_layer_persistent = !is_one_shot;
-    }
-    
-    // --- Step 3: Inform the Mac of the result ---
-    // After processing the command, we send the ACTUALLY active layer to the Mac.
-    // In auto mode, the Mac will receive the new layer number.
-    // In manual mode, the Mac will receive 0 (base) because we didn't activate anything.
-    //
-    // NOTE: on_layer_state_changed will also be triggered by the
-    // zmk_keymap_layer_activate/deactivate calls above, which will also
-    // call send_active_layer_to_mac(). But we call it here explicitly for
-    // the layer==0 case where no ZMK layer change occurs, ensuring the
-    // Mac always gets a response to its command.
-    send_active_layer_to_mac();
-    
+#if IS_ENABLED(CONFIG_AEKLIPSE_HID_LEGACY_COMPAT)
+    (void)handle_legacy(ev);
+#endif
     return ZMK_EV_EVENT_BUBBLE;
 }
 
+static int on_layer_state_changed(const zmk_event_t *eh) {
+    if (v1_negotiated) {
+        send_state_snapshot(0);
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
 
-/* ==========================================================================
- * SECTION 3 : KEYBOARD INPUT HANDLING  (F13 toggle + One-shot deactivation)
- * ========================================================================== */
+static bool is_modifier(uint16_t usage_page, uint32_t keycode) {
+    return usage_page == 0x07 && keycode >= 0xE0 && keycode <= 0xE7;
+}
 
-/*
- * on_keycode_state_changed()
- * 
- * ZMK event listener triggered on EVERY key press or release on the keyboard.
- * 
- * TWO FUNCTIONS:
- *   1. F13 TOGGLE: If the user presses F13, activate/deactivate the layer
- *      stored in current_app_layer (Manual mode).
- * 
- *   2. ONE-SHOT: If the active layer is in non-persistent mode (one-shot)
- *      and the user presses an ORDINARY key (not a modifier), deactivate
- *      the layer after this keypress.
- * 
- * F13 is an alternative to &app_layer. Both achieve the same toggle.
- * &app_layer uses behavior_app_layer.c, F13 uses this listener.
- * They are mutually exclusive in the keymap (use one or the other).
- * 
- * HID MODIFIER KEY CODES (usage page 0x07):
- *   0xE0 = Left Ctrl,  0xE1 = Left Shift,  0xE2 = Left Alt,  0xE3 = Left GUI (Cmd)
- *   0xE4 = Right Ctrl, 0xE5 = Right Shift, 0xE6 = Right Alt, 0xE7 = Right GUI
- */
 static int on_keycode_state_changed(const zmk_event_t *eh) {
-    // Cast the generic event to a keycode state changed event.
     const struct zmk_keycode_state_changed *ev = as_zmk_keycode_state_changed(eh);
-    
-    // Ignore key releases and invalid events.
-    // We only react to key PRESSES (state == true).
     if (ev == NULL || !ev->state) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    // ──────────────────────────────────────────
-    // FUNCTION 1: TOGGLE via F13 (keycode 0x68)
-    // ──────────────────────────────────────────
-    // F13 is the key mapped in the keymap to toggle the current app layer.
-    // Usage page 0x07 = Keyboard/Keypad, keycode 0x68 = F13.
     if (ev->usage_page == 0x07 && ev->keycode == 0x68) {
         if (current_app_layer > 0 && active_app_layer == 0) {
-            // No layer is active but a layer is stored in memory -> ACTIVATE it
-            // This triggers zmk_layer_state_changed -> send_active_layer_to_mac
-            zmk_keymap_layer_activate(current_app_layer, true);
+            zmk_keymap_layer_activate(current_app_layer, false);
             active_app_layer = current_app_layer;
         } else if (active_app_layer > 0) {
-            // A layer is active -> DEACTIVATE it (return to base)
-            // This triggers zmk_layer_state_changed -> send_active_layer_to_mac
-            zmk_keymap_layer_deactivate(active_app_layer, true);
-            active_app_layer = 0;
+            clear_smart_app_owned_layer();
         }
-        // ZMK_EV_EVENT_HANDLED: We consume the F13 event to prevent it
-        // from being processed as a normal keypress by ZMK.
-        // Without this, F13 would be sent to the Mac as a regular keystroke.
         return ZMK_EV_EVENT_HANDLED;
     }
 
-    // ──────────────────────────────────────────
-    // FUNCTION 2: ONE-SHOT (deactivate after 1 keypress)
-    // ──────────────────────────────────────────
-    // If an app layer is active AND it's in non-persistent mode (one-shot),
-    // deactivate it after the next ordinary keypress.
-    if (active_app_layer > 0 && !is_layer_persistent) {
-        
-        // Check if the pressed key is a modifier (Ctrl, Shift, Alt, Cmd/GUI).
-        // Modifiers do NOT trigger one-shot deactivation.
-        // This allows: Activate layer -> Hold Cmd -> Type a shortcut
-        // without the layer deactivating too early.
-        bool is_mod = (ev->usage_page == 0x07 && ev->keycode >= 0xE0 && ev->keycode <= 0xE7);
-        
-        if (!is_mod) {
-            // Ordinary key pressed: deactivate the one-shot layer
-            // This triggers zmk_layer_state_changed -> send_active_layer_to_mac
-            zmk_keymap_layer_deactivate(active_app_layer, true);
-            active_app_layer = 0;
-        }
+    if (active_app_layer > 0 && !is_layer_persistent && !is_modifier(ev->usage_page, ev->keycode)) {
+        clear_smart_app_owned_layer();
     }
-
     return ZMK_EV_EVENT_BUBBLE;
 }
 
-
-/* ==========================================================================
- * ZMK EVENT LISTENER REGISTRATION
- * ========================================================================== */
-
-// Listener 1: Receive Raw HID commands from the Mac.
-// Identifier: "app_layer_sync_hid"
-// Subscribed to: raw_hid_received_event (emitted by the zmk-raw-hid module
-// when the dongle receives a USB output report from the Mac).
-ZMK_LISTENER(app_layer_sync_hid, on_raw_hid_received);
-ZMK_SUBSCRIPTION(app_layer_sync_hid, raw_hid_received_event);
-
-// Listener 2: Detect physical key presses (F13 toggle + one-shot).
-// Identifier: "app_layer_sync_key"
-// Subscribed to: zmk_keycode_state_changed (emitted by ZMK on every
-// key press or release across the entire keyboard).
-ZMK_LISTENER(app_layer_sync_key, on_keycode_state_changed);
-ZMK_SUBSCRIPTION(app_layer_sync_key, zmk_keycode_state_changed);
+ZMK_LISTENER(aeklipse_raw_hid, on_raw_hid_received);
+ZMK_SUBSCRIPTION(aeklipse_raw_hid, raw_hid_received_event);
+ZMK_LISTENER(aeklipse_layer_report, on_layer_state_changed);
+ZMK_SUBSCRIPTION(aeklipse_layer_report, zmk_layer_state_changed);
+ZMK_LISTENER(aeklipse_keycode, on_keycode_state_changed);
+ZMK_SUBSCRIPTION(aeklipse_keycode, zmk_keycode_state_changed);
