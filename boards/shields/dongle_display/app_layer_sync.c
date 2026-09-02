@@ -9,7 +9,11 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/events/layer_state_changed.h>
+#include <zmk/events/usb_conn_state_changed.h>
 #include <zmk/keymap.h>
+#include <zmk/split/transport/central.h>
+#include <zmk/split/transport/types.h>
+#include <zmk/usb.h>
 
 #include <raw_hid/events.h>
 
@@ -26,6 +30,7 @@
 #define AEK_MSG_SET_LAYER_INTENT 0x10
 #define AEK_MSG_STATE_SNAPSHOT 0x80
 #define AEK_MSG_HELLO_ACK 0x81
+#define AEK_MSG_LINK_STATE_CHANGED 0x82
 #define AEK_MSG_ACK 0x90
 #define AEK_MSG_NACK 0x91
 
@@ -33,16 +38,23 @@
 #define AEK_INTENT_ONE_SHOT BIT(1)
 #define AEK_INTENT_KNOWN_MASK (AEK_INTENT_ACTIVATE_NOW | AEK_INTENT_ONE_SHOT)
 
-#define AEK_ERR_MALFORMED 1
-#define AEK_ERR_UNSUPPORTED_VERSION 2
-#define AEK_ERR_UNKNOWN_TYPE 3
-#define AEK_ERR_INVALID_LAYER 4
-#define AEK_ERR_NOT_NEGOTIATED 5
-#define AEK_ERR_INVALID_FLAGS 6
+#define AEK_ERR_UNSUPPORTED_VERSION 0x01
+#define AEK_ERR_UNSUPPORTED_MESSAGE 0x02
+#define AEK_ERR_INVALID_PAYLOAD 0x03
+#define AEK_ERR_INVALID_LAYER 0x04
+#define AEK_ERR_NOT_READY 0x05
+#define AEK_ERR_KEYBOARD_UNAVAILABLE 0x06
+#define AEK_ERR_BUSY 0x07
+#define AEK_ERR_INTERNAL_ERROR 0x08
 
 #define AEK_CAP_STATE_SNAPSHOT BIT(0)
 #define AEK_CAP_LAYER_INTENT BIT(1)
 #define AEK_CAP_LEGACY_COMPAT BIT(2)
+
+#define AEK_LINK_DISCONNECTED 0
+#define AEK_LINK_SOME_CONNECTED 1
+#define AEK_LINK_ALL_CONNECTED 2
+#define AEK_LINK_POLL_MS 250
 
 struct aek_layer_map {
     const char *layer_id;
@@ -50,24 +62,26 @@ struct aek_layer_map {
     zmk_keymap_layer_id_t zmk_id;
 };
 
-/* Explicit catalog: host persistence uses layer_id; the wire uses wire_ref;
- * firmware resolves wire_ref to the current ZMK layer id. Numeric equality is incidental. */
 static const struct aek_layer_map layer_map[] = {
     {"base", 0, 0}, {"num-lock", 1, 1}, {"symbols", 2, 2}, {"vim-nav", 3, 3},
     {"nav-num", 4, 4}, {"num-row", 5, 5}, {"fn-media", 6, 6},
     {"app-autocad", 7, 7}, {"app-word", 8, 8}, {"app-excel", 9, 9}, {"app-calc", 10, 10},
 };
 
-/* Shared with behavior_app_layer.c. These are internal ZMK ids, never wire identities. */
+/* Shared with behavior_app_layer.c. Internal ZMK ids are never wire identities. */
 uint8_t current_app_layer = 0;
 uint8_t active_app_layer = 0;
 bool is_layer_persistent = false;
+
+/* ZMK pinned baseline exports this symbol from app/src/split/central.c. */
+extern const struct zmk_split_transport_central *active_transport;
 
 static bool v1_negotiated;
 static uint16_t session_id;
 static uint16_t state_revision;
 static uint32_t host_nonce;
 static uint8_t smart_app_selected_ref = AEK_NONE_REF;
+static uint8_t keyboard_link_state = AEK_LINK_DISCONNECTED;
 
 static const struct aek_layer_map *map_from_ref(uint8_t ref) {
     for (size_t i = 0; i < ARRAY_SIZE(layer_map); i++) {
@@ -112,6 +126,32 @@ static void send_nack(uint16_t sequence, uint8_t rejected_type, uint8_t error) {
     send_frame(AEK_MSG_NACK, sequence, payload, sizeof(payload));
 }
 
+static uint8_t read_keyboard_link_state(void) {
+    if (active_transport == NULL || active_transport->api == NULL ||
+        active_transport->api->get_status == NULL) {
+        return AEK_LINK_DISCONNECTED;
+    }
+
+    struct zmk_split_transport_status status = active_transport->api->get_status();
+    if (!status.available || !status.enabled) {
+        return AEK_LINK_DISCONNECTED;
+    }
+
+    switch (status.connections) {
+    case ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_ALL_CONNECTED:
+        return AEK_LINK_ALL_CONNECTED;
+    case ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_SOME_CONNECTED:
+        return AEK_LINK_SOME_CONNECTED;
+    case ZMK_SPLIT_TRANSPORT_CONNECTIONS_STATUS_DISCONNECTED:
+    default:
+        return AEK_LINK_DISCONNECTED;
+    }
+}
+
+static bool layer_state_valid(void) {
+    return keyboard_link_state == AEK_LINK_ALL_CONNECTED;
+}
+
 static void build_active_bitmap(uint8_t bitmap[16]) {
     memset(bitmap, 0, 16);
     for (size_t i = 0; i < ARRAY_SIZE(layer_map); i++) {
@@ -124,22 +164,35 @@ static void build_active_bitmap(uint8_t bitmap[16]) {
 
 static void send_state_snapshot(uint16_t sequence) {
     uint8_t payload[24] = {0};
-    uint8_t bitmap[16];
-    zmk_keymap_layer_index_t highest_index = zmk_keymap_highest_layer_active();
-    zmk_keymap_layer_id_t highest_id = zmk_keymap_layer_index_to_id(highest_index);
-    uint8_t highest_ref = ref_from_zmk_id(highest_id);
+    bool valid = layer_state_valid();
 
-    build_active_bitmap(bitmap);
     state_revision++;
     sys_put_le16(state_revision, &payload[0]);
-    payload[2] = 1;
-    payload[3] = 1; /* local/dongle state available; aggregate BLE detail remains a later gate */
-    payload[4] = highest_ref;
-    payload[5] = smart_app_selected_ref;
+    payload[2] = valid ? 1 : 0;
+    payload[3] = keyboard_link_state;
+    payload[4] = AEK_NONE_REF;
+    payload[5] = AEK_NONE_REF;
     payload[6] = 16;
-    memcpy(&payload[7], bitmap, sizeof(bitmap));
+
+    if (valid) {
+        uint8_t bitmap[16];
+        zmk_keymap_layer_index_t highest_index = zmk_keymap_highest_layer_active();
+        zmk_keymap_layer_id_t highest_id = zmk_keymap_layer_index_to_id(highest_index);
+        uint8_t highest_ref = ref_from_zmk_id(highest_id);
+
+        build_active_bitmap(bitmap);
+        payload[4] = highest_ref;
+        payload[5] = smart_app_selected_ref;
+        memcpy(&payload[7], bitmap, sizeof(bitmap));
+    }
+
     payload[23] = 0;
     send_frame(AEK_MSG_STATE_SNAPSHOT, sequence, payload, sizeof(payload));
+}
+
+static void send_link_state_changed(void) {
+    uint8_t payload[2] = {keyboard_link_state, layer_state_valid() ? 1 : 0};
+    send_frame(AEK_MSG_LINK_STATE_CHANGED, 0, payload, sizeof(payload));
 }
 
 static void send_hello_ack(uint16_t sequence) {
@@ -152,7 +205,7 @@ static void send_hello_ack(uint16_t sequence) {
     sys_put_le16(session_id, &payload[4]);
     sys_put_le16(capabilities, &payload[6]);
     sys_put_le16(1, &payload[8]);
-    sys_put_le32(0x53454C31u, &payload[10]); /* SEL1 catalog fingerprint */
+    sys_put_le32(0x53454C31u, &payload[10]);
     send_frame(AEK_MSG_HELLO_ACK, sequence, payload, sizeof(payload));
 }
 
@@ -170,7 +223,10 @@ static int apply_layer_intent(uint8_t ref, uint8_t flags) {
         return -AEK_ERR_INVALID_LAYER;
     }
     if ((flags & ~AEK_INTENT_KNOWN_MASK) != 0) {
-        return -AEK_ERR_INVALID_FLAGS;
+        return -AEK_ERR_INVALID_PAYLOAD;
+    }
+    if (!layer_state_valid()) {
+        return -AEK_ERR_KEYBOARD_UNAVAILABLE;
     }
 
     clear_smart_app_owned_layer();
@@ -190,6 +246,15 @@ static int apply_layer_intent(uint8_t ref, uint8_t flags) {
     return 0;
 }
 
+static bool unused_payload_bytes_zero(const uint8_t data[AEK_REPORT_SIZE], uint8_t payload_len) {
+    for (size_t i = AEK_HEADER_SIZE + payload_len; i < AEK_REPORT_SIZE; i++) {
+        if (data[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void handle_v1(const struct raw_hid_received_event *ev) {
     const uint8_t *data = ev->data;
     uint8_t type = data[3];
@@ -201,8 +266,9 @@ static void handle_v1(const struct raw_hid_received_event *ev) {
         send_nack(sequence, type, AEK_ERR_UNSUPPORTED_VERSION);
         return;
     }
-    if (flags != 0 || payload_len > AEK_MAX_PAYLOAD) {
-        send_nack(sequence, type, AEK_ERR_MALFORMED);
+    if (flags != 0 || payload_len > AEK_MAX_PAYLOAD ||
+        !unused_payload_bytes_zero(data, payload_len)) {
+        send_nack(sequence, type, AEK_ERR_INVALID_PAYLOAD);
         return;
     }
 
@@ -210,7 +276,7 @@ static void handle_v1(const struct raw_hid_received_event *ev) {
     switch (type) {
     case AEK_MSG_HELLO:
         if (payload_len != 4) {
-            send_nack(sequence, type, AEK_ERR_MALFORMED);
+            send_nack(sequence, type, AEK_ERR_INVALID_PAYLOAD);
             return;
         }
         host_nonce = sys_get_le32(payload);
@@ -219,28 +285,31 @@ static void handle_v1(const struct raw_hid_received_event *ev) {
             session_id = 1;
         }
         state_revision = 0;
+        keyboard_link_state = read_keyboard_link_state();
         v1_negotiated = true;
         send_hello_ack(sequence);
         send_state_snapshot(sequence);
         return;
     case AEK_MSG_GET_STATE:
         if (!v1_negotiated) {
-            send_nack(sequence, type, AEK_ERR_NOT_NEGOTIATED);
+            send_nack(sequence, type, AEK_ERR_NOT_READY);
         } else if (payload_len != 0) {
-            send_nack(sequence, type, AEK_ERR_MALFORMED);
+            send_nack(sequence, type, AEK_ERR_INVALID_PAYLOAD);
         } else {
+            keyboard_link_state = read_keyboard_link_state();
             send_state_snapshot(sequence);
         }
         return;
     case AEK_MSG_SET_LAYER_INTENT:
         if (!v1_negotiated) {
-            send_nack(sequence, type, AEK_ERR_NOT_NEGOTIATED);
+            send_nack(sequence, type, AEK_ERR_NOT_READY);
             return;
         }
         if (payload_len != 2) {
-            send_nack(sequence, type, AEK_ERR_MALFORMED);
+            send_nack(sequence, type, AEK_ERR_INVALID_PAYLOAD);
             return;
         }
+        keyboard_link_state = read_keyboard_link_state();
         {
             int rc = apply_layer_intent(payload[0], payload[1]);
             if (rc < 0) {
@@ -252,7 +321,7 @@ static void handle_v1(const struct raw_hid_received_event *ev) {
         }
         return;
     default:
-        send_nack(sequence, type, AEK_ERR_UNKNOWN_TYPE);
+        send_nack(sequence, type, AEK_ERR_UNSUPPORTED_MESSAGE);
         return;
     }
 }
@@ -270,7 +339,10 @@ static bool handle_legacy(const struct raw_hid_received_event *ev) {
     if (ev->data[2]) {
         flags |= AEK_INTENT_ONE_SHOT;
     }
-    (void)apply_layer_intent(ref, flags);
+    keyboard_link_state = read_keyboard_link_state();
+    if (apply_layer_intent(ref, flags) < 0) {
+        return false;
+    }
 
     uint8_t report[AEK_REPORT_SIZE] = {0};
     report[0] = zmk_keymap_highest_layer_active();
@@ -296,6 +368,7 @@ static int on_raw_hid_received(const zmk_event_t *eh) {
 
 static int on_layer_state_changed(const zmk_event_t *eh) {
     if (v1_negotiated) {
+        keyboard_link_state = read_keyboard_link_state();
         send_state_snapshot(0);
     }
     return ZMK_EV_EVENT_BUBBLE;
@@ -327,9 +400,52 @@ static int on_keycode_state_changed(const zmk_event_t *eh) {
     return ZMK_EV_EVENT_BUBBLE;
 }
 
+static int on_usb_conn_state_changed(const zmk_event_t *eh) {
+    const struct zmk_usb_conn_state_changed *ev = as_zmk_usb_conn_state_changed(eh);
+    if (ev == NULL) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+    if (ev->conn_state != ZMK_USB_CONN_HID) {
+        v1_negotiated = false;
+        host_nonce = 0;
+        state_revision = 0;
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+static void link_poll_work_handler(struct k_work *work);
+K_WORK_DELAYABLE_DEFINE(aek_link_poll_work, link_poll_work_handler);
+
+static void link_poll_work_handler(struct k_work *work) {
+    ARG_UNUSED(work);
+    if (!v1_negotiated) {
+        return;
+    }
+
+    uint8_t new_state = read_keyboard_link_state();
+    if (new_state != keyboard_link_state) {
+        keyboard_link_state = new_state;
+        send_link_state_changed();
+        send_state_snapshot(0);
+    }
+    k_work_reschedule(&aek_link_poll_work, K_MSEC(AEK_LINK_POLL_MS));
+}
+
+static int on_aeklipse_session_activity(const zmk_event_t *eh) {
+    ARG_UNUSED(eh);
+    if (v1_negotiated) {
+        k_work_reschedule(&aek_link_poll_work, K_MSEC(AEK_LINK_POLL_MS));
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
 ZMK_LISTENER(aeklipse_raw_hid, on_raw_hid_received);
 ZMK_SUBSCRIPTION(aeklipse_raw_hid, raw_hid_received_event);
 ZMK_LISTENER(aeklipse_layer_report, on_layer_state_changed);
 ZMK_SUBSCRIPTION(aeklipse_layer_report, zmk_layer_state_changed);
 ZMK_LISTENER(aeklipse_keycode, on_keycode_state_changed);
 ZMK_SUBSCRIPTION(aeklipse_keycode, zmk_keycode_state_changed);
+ZMK_LISTENER(aeklipse_usb, on_usb_conn_state_changed);
+ZMK_SUBSCRIPTION(aeklipse_usb, zmk_usb_conn_state_changed);
+ZMK_LISTENER(aeklipse_session_activity, on_aeklipse_session_activity);
+ZMK_SUBSCRIPTION(aeklipse_session_activity, raw_hid_received_event);
