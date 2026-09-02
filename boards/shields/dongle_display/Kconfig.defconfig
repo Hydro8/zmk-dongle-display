@@ -11,12 +11,20 @@ config ZMK_DISPLAY_STATUS_SCREEN_CUSTOM
     select LV_USE_LABEL
     select LV_USE_IMAGE
     select LV_USE_CANVAS
-    select LV_USE_ANIMIMG 
+    select LV_USE_ANIMIMG
     select LV_USE_ANIMATION
-    select LV_USE_LINE 
+    select LV_USE_LINE
     select LV_FONT_UNSCII_8
     select ZMK_WPM
     imply ZMK_HID_INDICATORS
+
+config AEKLIPSE_HID_LEGACY_COMPAT
+    bool "Temporary Selenium legacy Raw HID compatibility"
+    default y
+    help
+        Explicit transitional parser for the pre-v1 32-byte Selenium wire.
+        Disable after the macOS v1 migration is qualified. Malformed v1 frames
+        never fall back to this parser.
 
 config ZMK_DONGLE_DISPLAY_DONGLE_BATTERY
     bool "Show also the battery level of the dongle"
@@ -41,14 +49,11 @@ config ZMK_DONGLE_DISPLAY_LAYER_NAME_SCROLL_WIDTH
     int "Width for layer name label (in pixels)"
     default 50
     help
-        Width in pixels for the layer name label. When the layer name
-        exceeds this width, it will scroll horizontally in a circular pattern.
+        Width in pixels for layer name label.
 
 config ZMK_DONGLE_DISPLAY_LAYER_TEXT_ALIGN
     string "Layer name text alignment"
     default "left"
-    help
-        Text alignment for the layer name label. Valid values: "left", "center", "right".
 
 config ZMK_DONGLE_DISPLAY_WPM
     bool "Display the WPM widget"
