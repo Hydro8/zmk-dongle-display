@@ -68,12 +68,10 @@ static const struct aek_layer_map layer_map[] = {
     {"app-autocad", 7, 7}, {"app-word", 8, 8}, {"app-excel", 9, 9}, {"app-calc", 10, 10},
 };
 
-/* Shared with behavior_app_layer.c. Internal ZMK ids are never wire identities. */
 uint8_t current_app_layer = 0;
 uint8_t active_app_layer = 0;
 bool is_layer_persistent = false;
 
-/* ZMK pinned baseline exports this symbol from app/src/split/central.c. */
 extern const struct zmk_split_transport_central *active_transport;
 
 static bool v1_negotiated;
@@ -186,7 +184,6 @@ static void send_state_snapshot(uint16_t sequence) {
         memcpy(&payload[7], bitmap, sizeof(bitmap));
     }
 
-    payload[23] = 0;
     send_frame(AEK_MSG_STATE_SNAPSHOT, sequence, payload, sizeof(payload));
 }
 
@@ -194,6 +191,9 @@ static void send_link_state_changed(void) {
     uint8_t payload[2] = {keyboard_link_state, layer_state_valid() ? 1 : 0};
     send_frame(AEK_MSG_LINK_STATE_CHANGED, 0, payload, sizeof(payload));
 }
+
+static void link_poll_work_handler(struct k_work *work);
+K_WORK_DELAYABLE_DEFINE(aek_link_poll_work, link_poll_work_handler);
 
 static void send_hello_ack(uint16_t sequence) {
     uint8_t payload[14] = {0};
@@ -289,6 +289,7 @@ static void handle_v1(const struct raw_hid_received_event *ev) {
         v1_negotiated = true;
         send_hello_ack(sequence);
         send_state_snapshot(sequence);
+        k_work_reschedule(&aek_link_poll_work, K_MSEC(AEK_LINK_POLL_MS));
         return;
     case AEK_MSG_GET_STATE:
         if (!v1_negotiated) {
@@ -409,12 +410,10 @@ static int on_usb_conn_state_changed(const zmk_event_t *eh) {
         v1_negotiated = false;
         host_nonce = 0;
         state_revision = 0;
+        k_work_cancel_delayable(&aek_link_poll_work);
     }
     return ZMK_EV_EVENT_BUBBLE;
 }
-
-static void link_poll_work_handler(struct k_work *work);
-K_WORK_DELAYABLE_DEFINE(aek_link_poll_work, link_poll_work_handler);
 
 static void link_poll_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
@@ -431,14 +430,6 @@ static void link_poll_work_handler(struct k_work *work) {
     k_work_reschedule(&aek_link_poll_work, K_MSEC(AEK_LINK_POLL_MS));
 }
 
-static int on_aeklipse_session_activity(const zmk_event_t *eh) {
-    ARG_UNUSED(eh);
-    if (v1_negotiated) {
-        k_work_reschedule(&aek_link_poll_work, K_MSEC(AEK_LINK_POLL_MS));
-    }
-    return ZMK_EV_EVENT_BUBBLE;
-}
-
 ZMK_LISTENER(aeklipse_raw_hid, on_raw_hid_received);
 ZMK_SUBSCRIPTION(aeklipse_raw_hid, raw_hid_received_event);
 ZMK_LISTENER(aeklipse_layer_report, on_layer_state_changed);
@@ -447,5 +438,3 @@ ZMK_LISTENER(aeklipse_keycode, on_keycode_state_changed);
 ZMK_SUBSCRIPTION(aeklipse_keycode, zmk_keycode_state_changed);
 ZMK_LISTENER(aeklipse_usb, on_usb_conn_state_changed);
 ZMK_SUBSCRIPTION(aeklipse_usb, zmk_usb_conn_state_changed);
-ZMK_LISTENER(aeklipse_session_activity, on_aeklipse_session_activity);
-ZMK_SUBSCRIPTION(aeklipse_session_activity, raw_hid_received_event);
