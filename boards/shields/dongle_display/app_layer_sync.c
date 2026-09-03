@@ -88,7 +88,8 @@ static uint8_t smart_app_selected_ref = AEK_NONE_REF;
 static uint8_t keyboard_link_state = AEK_LINK_DISCONNECTED;
 static uint8_t physical_key_bitmap[AEK_POSITION_BITMAP_BYTES];
 static bool physical_state_valid;
-static bool physical_epoch_tainted;
+static bool physical_epoch_tainted = true;
+static bool physical_epoch_waiting_for_observation;
 static bool link_poll_started;
 
 static const struct aek_layer_map *map_from_ref(uint8_t ref) {
@@ -163,6 +164,7 @@ static bool layer_state_valid(void) {
 static void invalidate_physical_state(void) {
     physical_state_valid = false;
     physical_epoch_tainted = true;
+    physical_epoch_waiting_for_observation = false;
     memset(physical_key_bitmap, 0, sizeof(physical_key_bitmap));
 }
 
@@ -171,8 +173,39 @@ static void refresh_physical_validity(uint8_t link_state) {
         invalidate_physical_state();
         return;
     }
-    if (!physical_epoch_tainted) {
+
+    if (physical_epoch_tainted) {
+        physical_epoch_tainted = false;
+        physical_epoch_waiting_for_observation = true;
+        physical_state_valid = false;
+        memset(physical_key_bitmap, 0, sizeof(physical_key_bitmap));
+    }
+}
+
+static void observe_physical_position(uint32_t position, bool pressed) {
+    if (position >= AEK_POSITION_COUNT) {
+        invalidate_physical_state();
+        return;
+    }
+    if (keyboard_link_state != AEK_LINK_ALL_CONNECTED) {
+        invalidate_physical_state();
+        return;
+    }
+
+    if (physical_epoch_waiting_for_observation) {
+        physical_epoch_waiting_for_observation = false;
         physical_state_valid = true;
+    }
+
+    if (!physical_state_valid) {
+        return;
+    }
+
+    uint8_t mask = BIT(position % 8);
+    if (pressed) {
+        physical_key_bitmap[position / 8] |= mask;
+    } else {
+        physical_key_bitmap[position / 8] &= (uint8_t)~mask;
     }
 }
 
@@ -428,17 +461,7 @@ static int on_position_state_changed(const zmk_event_t *eh) {
 
     keyboard_link_state = read_keyboard_link_state();
     refresh_physical_validity(keyboard_link_state);
-
-    if (ev->position >= AEK_POSITION_COUNT) {
-        invalidate_physical_state();
-    } else if (physical_state_valid) {
-        uint8_t mask = BIT(ev->position % 8);
-        if (ev->state) {
-            physical_key_bitmap[ev->position / 8] |= mask;
-        } else {
-            physical_key_bitmap[ev->position / 8] &= (uint8_t)~mask;
-        }
-    }
+    observe_physical_position(ev->position, ev->state);
 
     if (v1_negotiated) {
         send_physical_key_state(0);
