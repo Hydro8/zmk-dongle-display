@@ -9,6 +9,7 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/events/layer_state_changed.h>
+#include <zmk/events/position_state_changed.h>
 #include <zmk/events/usb_conn_state_changed.h>
 #include <zmk/keymap.h>
 #include <zmk/split/transport/central.h>
@@ -31,6 +32,7 @@
 #define AEK_MSG_STATE_SNAPSHOT 0x80
 #define AEK_MSG_HELLO_ACK 0x81
 #define AEK_MSG_LINK_STATE_CHANGED 0x82
+#define AEK_MSG_PHYSICAL_KEY_STATE 0x83
 #define AEK_MSG_ACK 0x90
 #define AEK_MSG_NACK 0x91
 
@@ -50,11 +52,15 @@
 #define AEK_CAP_STATE_SNAPSHOT BIT(0)
 #define AEK_CAP_LAYER_INTENT BIT(1)
 #define AEK_CAP_LEGACY_COMPAT BIT(2)
+#define AEK_CAP_PHYSICAL_KEY_STATE BIT(3)
 
 #define AEK_LINK_DISCONNECTED 0
 #define AEK_LINK_SOME_CONNECTED 1
 #define AEK_LINK_ALL_CONNECTED 2
 #define AEK_LINK_POLL_MS 250
+
+#define AEK_POSITION_COUNT 64
+#define AEK_POSITION_BITMAP_BYTES 8
 
 struct aek_layer_map {
     const char *layer_id;
@@ -80,6 +86,10 @@ static uint16_t state_revision;
 static uint32_t host_nonce;
 static uint8_t smart_app_selected_ref = AEK_NONE_REF;
 static uint8_t keyboard_link_state = AEK_LINK_DISCONNECTED;
+static uint8_t physical_key_bitmap[AEK_POSITION_BITMAP_BYTES];
+static bool physical_state_valid;
+static bool physical_epoch_tainted;
+static bool link_poll_started;
 
 static const struct aek_layer_map *map_from_ref(uint8_t ref) {
     for (size_t i = 0; i < ARRAY_SIZE(layer_map); i++) {
@@ -150,6 +160,32 @@ static bool layer_state_valid(void) {
     return keyboard_link_state == AEK_LINK_ALL_CONNECTED;
 }
 
+static void invalidate_physical_state(void) {
+    physical_state_valid = false;
+    physical_epoch_tainted = true;
+    memset(physical_key_bitmap, 0, sizeof(physical_key_bitmap));
+}
+
+static void refresh_physical_validity(uint8_t link_state) {
+    if (link_state != AEK_LINK_ALL_CONNECTED) {
+        invalidate_physical_state();
+        return;
+    }
+    if (!physical_epoch_tainted) {
+        physical_state_valid = true;
+    }
+}
+
+static void send_physical_key_state(uint16_t sequence) {
+    uint8_t payload[2 + AEK_POSITION_BITMAP_BYTES] = {0};
+    payload[0] = physical_state_valid ? 1 : 0;
+    payload[1] = AEK_POSITION_COUNT;
+    if (physical_state_valid) {
+        memcpy(&payload[2], physical_key_bitmap, sizeof(physical_key_bitmap));
+    }
+    send_frame(AEK_MSG_PHYSICAL_KEY_STATE, sequence, payload, sizeof(payload));
+}
+
 static void build_active_bitmap(uint8_t bitmap[16]) {
     memset(bitmap, 0, 16);
     for (size_t i = 0; i < ARRAY_SIZE(layer_map); i++) {
@@ -197,7 +233,8 @@ K_WORK_DELAYABLE_DEFINE(aek_link_poll_work, link_poll_work_handler);
 
 static void send_hello_ack(uint16_t sequence) {
     uint8_t payload[14] = {0};
-    uint16_t capabilities = AEK_CAP_STATE_SNAPSHOT | AEK_CAP_LAYER_INTENT;
+    uint16_t capabilities =
+        AEK_CAP_STATE_SNAPSHOT | AEK_CAP_LAYER_INTENT | AEK_CAP_PHYSICAL_KEY_STATE;
 #if IS_ENABLED(CONFIG_AEKLIPSE_HID_LEGACY_COMPAT)
     capabilities |= AEK_CAP_LEGACY_COMPAT;
 #endif
@@ -286,9 +323,12 @@ static void handle_v1(const struct raw_hid_received_event *ev) {
         }
         state_revision = 0;
         keyboard_link_state = read_keyboard_link_state();
+        refresh_physical_validity(keyboard_link_state);
         v1_negotiated = true;
         send_hello_ack(sequence);
         send_state_snapshot(sequence);
+        send_physical_key_state(sequence);
+        link_poll_started = true;
         k_work_reschedule(&aek_link_poll_work, K_MSEC(AEK_LINK_POLL_MS));
         return;
     case AEK_MSG_GET_STATE:
@@ -298,7 +338,9 @@ static void handle_v1(const struct raw_hid_received_event *ev) {
             send_nack(sequence, type, AEK_ERR_INVALID_PAYLOAD);
         } else {
             keyboard_link_state = read_keyboard_link_state();
+            refresh_physical_validity(keyboard_link_state);
             send_state_snapshot(sequence);
+            send_physical_key_state(sequence);
         }
         return;
     case AEK_MSG_SET_LAYER_INTENT:
@@ -311,6 +353,7 @@ static void handle_v1(const struct raw_hid_received_event *ev) {
             return;
         }
         keyboard_link_state = read_keyboard_link_state();
+        refresh_physical_validity(keyboard_link_state);
         {
             int rc = apply_layer_intent(payload[0], payload[1]);
             if (rc < 0) {
@@ -341,6 +384,7 @@ static bool handle_legacy(const struct raw_hid_received_event *ev) {
         flags |= AEK_INTENT_ONE_SHOT;
     }
     keyboard_link_state = read_keyboard_link_state();
+    refresh_physical_validity(keyboard_link_state);
     if (apply_layer_intent(ref, flags) < 0) {
         return false;
     }
@@ -370,7 +414,34 @@ static int on_raw_hid_received(const zmk_event_t *eh) {
 static int on_layer_state_changed(const zmk_event_t *eh) {
     if (v1_negotiated) {
         keyboard_link_state = read_keyboard_link_state();
+        refresh_physical_validity(keyboard_link_state);
         send_state_snapshot(0);
+    }
+    return ZMK_EV_EVENT_BUBBLE;
+}
+
+static int on_position_state_changed(const zmk_event_t *eh) {
+    const struct zmk_position_state_changed *ev = as_zmk_position_state_changed(eh);
+    if (ev == NULL) {
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+
+    keyboard_link_state = read_keyboard_link_state();
+    refresh_physical_validity(keyboard_link_state);
+
+    if (ev->position >= AEK_POSITION_COUNT) {
+        invalidate_physical_state();
+    } else if (physical_state_valid) {
+        uint8_t mask = BIT(ev->position % 8);
+        if (ev->state) {
+            physical_key_bitmap[ev->position / 8] |= mask;
+        } else {
+            physical_key_bitmap[ev->position / 8] &= (uint8_t)~mask;
+        }
+    }
+
+    if (v1_negotiated) {
+        send_physical_key_state(0);
     }
     return ZMK_EV_EVENT_BUBBLE;
 }
@@ -410,30 +481,38 @@ static int on_usb_conn_state_changed(const zmk_event_t *eh) {
         v1_negotiated = false;
         host_nonce = 0;
         state_revision = 0;
-        k_work_cancel_delayable(&aek_link_poll_work);
+    } else if (link_poll_started) {
+        k_work_reschedule(&aek_link_poll_work, K_MSEC(AEK_LINK_POLL_MS));
     }
     return ZMK_EV_EVENT_BUBBLE;
 }
 
 static void link_poll_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
-    if (!v1_negotiated) {
-        return;
-    }
 
     uint8_t new_state = read_keyboard_link_state();
-    if (new_state != keyboard_link_state) {
+    refresh_physical_validity(new_state);
+
+    if (v1_negotiated && new_state != keyboard_link_state) {
         keyboard_link_state = new_state;
         send_link_state_changed();
         send_state_snapshot(0);
+        send_physical_key_state(0);
+    } else {
+        keyboard_link_state = new_state;
     }
-    k_work_reschedule(&aek_link_poll_work, K_MSEC(AEK_LINK_POLL_MS));
+
+    if (link_poll_started) {
+        k_work_reschedule(&aek_link_poll_work, K_MSEC(AEK_LINK_POLL_MS));
+    }
 }
 
 ZMK_LISTENER(aeklipse_raw_hid, on_raw_hid_received);
 ZMK_SUBSCRIPTION(aeklipse_raw_hid, raw_hid_received_event);
 ZMK_LISTENER(aeklipse_layer_report, on_layer_state_changed);
 ZMK_SUBSCRIPTION(aeklipse_layer_report, zmk_layer_state_changed);
+ZMK_LISTENER(aeklipse_position_report, on_position_state_changed);
+ZMK_SUBSCRIPTION(aeklipse_position_report, zmk_position_state_changed);
 ZMK_LISTENER(aeklipse_keycode, on_keycode_state_changed);
 ZMK_SUBSCRIPTION(aeklipse_keycode, zmk_keycode_state_changed);
 ZMK_LISTENER(aeklipse_usb, on_usb_conn_state_changed);
