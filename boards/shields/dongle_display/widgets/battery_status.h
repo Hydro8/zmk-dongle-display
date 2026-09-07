@@ -16,3 +16,4 @@ struct zmk_widget_dongle_battery_status {
 
 int zmk_widget_dongle_battery_status_init(struct zmk_widget_dongle_battery_status *widget, lv_obj_t *parent);
 lv_obj_t *zmk_widget_dongle_battery_status_obj(struct zmk_widget_dongle_battery_status *widget);
+void zmk_widget_dongle_battery_status_set_connected_sources(const uint8_t *sources, size_t count);

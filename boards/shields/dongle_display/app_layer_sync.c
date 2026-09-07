@@ -157,6 +157,22 @@ static uint8_t read_keyboard_link_state(void) {
     }
 }
 
+int aeklipse_get_connected_sources(uint8_t *sources) {
+    if (sources == NULL || active_transport == NULL || active_transport->api == NULL ||
+        active_transport->api->get_status == NULL ||
+        active_transport->api->get_available_source_ids == NULL) {
+        return 0;
+    }
+
+    struct zmk_split_transport_status status = active_transport->api->get_status();
+    if (!status.available || !status.enabled) {
+        return 0;
+    }
+
+    int count = active_transport->api->get_available_source_ids(sources);
+    return count > 0 ? count : 0;
+}
+
 static bool layer_state_valid(void) {
     return keyboard_link_state == AEK_LINK_ALL_CONNECTED;
 }

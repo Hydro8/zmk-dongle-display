@@ -39,22 +39,66 @@ struct battery_state {
 
 struct battery_object {
     lv_obj_t *label;
+    uint8_t level;
+    bool usb_present;
+    bool connected;
 } battery_objects[ZMK_SPLIT_BLE_PERIPHERAL_COUNT + SOURCE_OFFSET];
+
+static void refresh_battery_visibility(uint8_t source) {
+    if (source >= ZMK_SPLIT_BLE_PERIPHERAL_COUNT + SOURCE_OFFSET) {
+        return;
+    }
+
+    struct battery_object *battery = &battery_objects[source];
+    bool visible;
+
+#if IS_ENABLED(CONFIG_ZMK_DONGLE_DISPLAY_DONGLE_BATTERY)
+    if (source == 0) {
+        visible = battery->level > 0 || battery->usb_present;
+    } else {
+        visible = battery->connected;
+    }
+#else
+    visible = battery->connected;
+#endif
+
+    if (visible) {
+        lv_obj_clear_flag(battery->label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(battery->label);
+    } else {
+        lv_obj_add_flag(battery->label, LV_OBJ_FLAG_HIDDEN);
+    }
+}
 
 static void set_battery_symbol(lv_obj_t *widget, struct battery_state state) {
     if (state.source >= ZMK_SPLIT_BLE_PERIPHERAL_COUNT + SOURCE_OFFSET) {
         return;
     }
-    LOG_DBG("source: %d, level: %d, usb: %d", state.source, state.level, state.usb_present);
-    lv_obj_t *label = battery_objects[state.source].label;
 
-    lv_label_set_text_fmt(label, "%3u%%", state.level);
-    
-    if (state.level > 0 || state.usb_present) {
-        lv_obj_clear_flag(label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_move_foreground(label);
-    } else {
-        lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
+    LOG_DBG("source: %d, level: %d, usb: %d", state.source, state.level, state.usb_present);
+
+    struct battery_object *battery = &battery_objects[state.source];
+    battery->level = state.level;
+    battery->usb_present = state.usb_present;
+
+    lv_label_set_text_fmt(battery->label, "%3u%%", state.level);
+    refresh_battery_visibility(state.source);
+}
+
+void zmk_widget_dongle_battery_status_set_connected_sources(const uint8_t *sources, size_t count) {
+    for (uint8_t peripheral = 0; peripheral < ZMK_SPLIT_BLE_PERIPHERAL_COUNT; peripheral++) {
+        bool connected = false;
+
+        for (size_t i = 0; i < count; i++) {
+            if (sources[i] == peripheral) {
+                connected = true;
+                break;
+            }
+        }
+
+        uint8_t source = peripheral + SOURCE_OFFSET;
+        battery_objects[source].connected = connected;
+        refresh_battery_visibility(source);
     }
 }
 
@@ -129,6 +173,9 @@ int zmk_widget_dongle_battery_status_init(struct zmk_widget_dongle_battery_statu
         
         battery_objects[i] = (struct battery_object){
             .label = battery_label,
+            .level = 0,
+            .usb_present = false,
+            .connected = false,
         };
     }
 
